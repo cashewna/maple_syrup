@@ -1,10 +1,12 @@
 use crate::ast::{Expr, to_latex};
-use crate::plot::PlotData;
+use crate::plot::{Plot3dData, PlotData};
+use crate::tutor::{de_presets, help_articles, simulate_de_scene, study_guide_chapters};
 use crate::worksheet::{CellOutput, MatrixPresetKind, MatrixTemplate, Worksheet, WorksheetCell};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    KeyDownEvent, PathBuilder, Pixels, Rgba, ScrollHandle, Window, actions, canvas, div, fill,
-    point, prelude::*, px, rgb, size,
+    AnyView, App, Bounds, ClipboardItem, Context, CursorStyle, FocusHandle, Focusable, FontWeight,
+    Hsla, KeyBinding, KeyDownEvent, MouseButton, PathBuilder, Pixels, Rgba, ScrollHandle, Window,
+    WindowControlArea, WindowDecorations, actions, canvas, div, fill, point, prelude::*, px, rgb,
+    size,
 };
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -129,6 +131,18 @@ impl MenuTab {
 enum DocumentContent {
     StartPage,
     Worksheet(Box<Worksheet>),
+    DePlotTutor {
+        preset_idx: usize,
+        x0: f64,
+        y0: f64,
+        show_arrows: bool,
+    },
+    StudyGuide {
+        chapter_idx: usize,
+    },
+    HelpBrowser {
+        article_idx: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -143,6 +157,11 @@ struct WorksheetTab {
     title: String,
     content: DocumentContent,
     selected_cell: Option<usize>,
+    editing_cell: Option<usize>,
+    plot2d_zoom: f64,
+    plot2d_pan_x: f64,
+    plot3d_yaw_deg: f64,
+    plot3d_pitch_deg: f64,
     input: String,
     cursor: usize,
     history: Vec<String>,
@@ -160,6 +179,11 @@ impl WorksheetTab {
             title: "Start.mw".to_string(),
             content: DocumentContent::StartPage,
             selected_cell: None,
+            editing_cell: None,
+            plot2d_zoom: 1.0,
+            plot2d_pan_x: 0.0,
+            plot3d_yaw_deg: 42.0,
+            plot3d_pitch_deg: 26.0,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -188,6 +212,11 @@ impl WorksheetTab {
             title,
             content: DocumentContent::Worksheet(Box::new(ws)),
             selected_cell,
+            editing_cell: None,
+            plot2d_zoom: 1.0,
+            plot2d_pan_x: 0.0,
+            plot3d_yaw_deg: 42.0,
+            plot3d_pitch_deg: 26.0,
             input: String::new(),
             cursor: 0,
             history,
@@ -199,17 +228,97 @@ impl WorksheetTab {
         }
     }
 
+    fn deplot_tutor(id: usize) -> Self {
+        let p = &de_presets()[0];
+        Self {
+            id,
+            title: "DEplot[interactive]".to_string(),
+            content: DocumentContent::DePlotTutor {
+                preset_idx: 0,
+                x0: p.default_ic.0,
+                y0: p.default_ic.1,
+                show_arrows: true,
+            },
+            selected_cell: None,
+            editing_cell: None,
+            plot2d_zoom: 1.0,
+            plot2d_pan_x: 0.0,
+            plot3d_yaw_deg: 42.0,
+            plot3d_pitch_deg: 26.0,
+            input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_elapsed_us: None,
+            scroll_handle: ScrollHandle::new(),
+        }
+    }
+
+    fn study_guide(id: usize, chapter_idx: usize) -> Self {
+        let title = if chapter_idx == 0 {
+            "StudyGuides,Precalculus,Chapter1".to_string()
+        } else {
+            study_guide_chapters()
+                .get(chapter_idx)
+                .map(|c| c.guide.to_string())
+                .unwrap_or_else(|| "Study Guide".to_string())
+        };
+        Self {
+            id,
+            title,
+            content: DocumentContent::StudyGuide { chapter_idx },
+            selected_cell: None,
+            editing_cell: None,
+            plot2d_zoom: 1.0,
+            plot2d_pan_x: 0.0,
+            plot3d_yaw_deg: 42.0,
+            plot3d_pitch_deg: 26.0,
+            input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_elapsed_us: None,
+            scroll_handle: ScrollHandle::new(),
+        }
+    }
+
+    fn help_browser(id: usize, article_idx: usize) -> Self {
+        Self {
+            id,
+            title: "Maple 2025 Help".to_string(),
+            content: DocumentContent::HelpBrowser { article_idx },
+            selected_cell: None,
+            editing_cell: None,
+            plot2d_zoom: 1.0,
+            plot2d_pan_x: 0.0,
+            plot3d_yaw_deg: 42.0,
+            plot3d_pitch_deg: 26.0,
+            input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_elapsed_us: None,
+            scroll_handle: ScrollHandle::new(),
+        }
+    }
+
     fn worksheet(&self) -> Option<&Worksheet> {
         match &self.content {
             DocumentContent::Worksheet(ws) => Some(ws),
-            DocumentContent::StartPage => None,
+            _ => None,
         }
     }
 
     fn worksheet_mut(&mut self) -> Option<&mut Worksheet> {
         match &mut self.content {
             DocumentContent::Worksheet(ws) => Some(ws),
-            DocumentContent::StartPage => None,
+            _ => None,
         }
     }
 
@@ -330,11 +439,14 @@ impl MapleWorkspaceView {
     }
 
     fn current_tab(&self) -> &WorksheetTab {
-        &self.tabs[self.active_tab]
+        let idx = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        &self.tabs[idx]
     }
 
     fn current_tab_mut(&mut self) -> &mut WorksheetTab {
-        &mut self.tabs[self.active_tab]
+        let idx = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.active_tab = idx;
+        &mut self.tabs[idx]
     }
 
     fn ensure_worksheet_tab(&mut self) -> usize {
@@ -439,12 +551,39 @@ impl MapleWorkspaceView {
         clear_prompt: bool,
         cx: &mut Context<Self>,
     ) {
+        if stmt.contains("DEtools[DEplot]") || stmt.starts_with("DEplot") {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(WorksheetTab::deplot_tutor(id));
+            self.active_tab = self.tabs.len() - 1;
+            self.status_message =
+                "Opened interactive DEtools[DEplot] phase-plane tutor".to_string();
+            cx.notify();
+            return;
+        }
         self.ensure_worksheet_tab();
         let tab = self.current_tab_mut();
         tab.push_undo(true);
+        let editing = tab.editing_cell.take();
         let Some(ws) = tab.worksheet_mut() else {
             return;
         };
+        if let Some(edit_idx) = editing
+            && ws.update_cell(edit_idx, stmt)
+        {
+            let last_elapsed_us = ws.cells.get(edit_idx).map(|c| c.elapsed_us);
+            tab.last_elapsed_us = last_elapsed_us;
+            tab.selected_cell = Some(edit_idx);
+            if clear_prompt {
+                tab.input.clear();
+                tab.cursor = 0;
+            }
+            self.status_message =
+                format!("Updated cell {} and re-evaluated worksheet", edit_idx + 1);
+            cx.notify();
+            return;
+        }
+
         let added = ws.evaluate(stmt);
         let total_us: u128 = added.iter().map(|c| c.elapsed_us).sum();
         let last_elapsed_us = added.last().map(|c| c.elapsed_us);
@@ -767,6 +906,128 @@ impl MapleWorkspaceView {
         cx.notify();
     }
 
+    fn open_deplot_tutor_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pos) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t.content, DocumentContent::DePlotTutor { .. }))
+        {
+            self.active_tab = pos;
+        } else {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(WorksheetTab::deplot_tutor(id));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.status_message = "DEtools[DEplot][interactive] tutor active".to_string();
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn open_study_guide_tab(
+        &mut self,
+        chapter_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pos) = self.tabs.iter().position(
+            |t| matches!(t.content, DocumentContent::StudyGuide { chapter_idx: c } if c == chapter_idx),
+        ) {
+            self.active_tab = pos;
+        } else {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(WorksheetTab::study_guide(id, chapter_idx));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.status_message = format!("Opened {}", self.current_tab().title);
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn open_help_browser_tab(
+        &mut self,
+        article_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pos) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t.content, DocumentContent::HelpBrowser { .. }))
+        {
+            self.active_tab = pos;
+            if let DocumentContent::HelpBrowser {
+                article_idx: ref mut cur,
+            } = self.tabs[pos].content
+            {
+                *cur = article_idx;
+            }
+        } else {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(WorksheetTab::help_browser(id, article_idx));
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.status_message = "Opened Maple 2025 Help Reference".to_string();
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn open_saved_worksheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = std::path::PathBuf::from("/home/kk/Projects/maple/worksheets");
+        let _ = std::fs::create_dir_all(&dir);
+        let candidate = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|s| s.to_str()),
+                    Some("mpl") | Some("mw")
+                )
+            })
+            .max();
+        let path = match candidate {
+            Some(p) => p,
+            None => {
+                let sample = dir.join("Sample_Inequalities.mpl");
+                let _ = std::fs::write(
+                    &sample,
+                    "# Precalculus Study Guide Ch.1\nsolve(2*x - 3 < 5, x);\nsolve(abs(2*x - 3) < 5, x);\nplot3d(sin(x)*cos(y), x = -Pi..Pi, y = -Pi..Pi);\n",
+                );
+                sample
+            }
+        };
+        let mut ws = Worksheet::new();
+        match ws.load_file(&path) {
+            Ok(cells) => {
+                let id = self.next_tab_id;
+                self.next_tab_id += 1;
+                let title = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Opened.mpl")
+                    .to_string();
+                let mut tab = WorksheetTab::new_worksheet(id, title, None);
+                tab.history = cells.iter().map(|c| c.input.clone()).collect();
+                tab.selected_cell = cells.len().checked_sub(1);
+                tab.last_elapsed_us = cells.last().map(|c| c.elapsed_us);
+                tab.content = DocumentContent::Worksheet(Box::new(ws));
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+                self.status_message = format!("Loaded {}", path.display());
+            }
+            Err(err) => {
+                self.status_message = format!("Open failed: {err}");
+            }
+        }
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
     fn duplicate_active_worksheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ws) = self.current_tab().worksheet() else {
             self.open_starter_worksheet(None, window, cx);
@@ -977,17 +1238,18 @@ impl MapleWorkspaceView {
         cx.notify();
     }
 
-    fn render_quick_access_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_quick_access_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode_label = match self.entry_mode {
             EntryMode::Math => "Math",
             EntryMode::Text => "Text",
         };
         let can_undo = !self.current_tab().undo_stack.is_empty();
         let can_redo = !self.current_tab().redo_stack.is_empty();
+        let max_icon = if window.is_maximized() { "❐" } else { "□" };
 
         div()
             .w_full()
-            .h(px(30.))
+            .h(px(34.))
             .px_2p5()
             .bg(rgb(0xdce5ef))
             .border_b_1()
@@ -995,7 +1257,7 @@ impl MapleWorkspaceView {
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
+            .gap_2()
             .child(
                 div()
                     .flex()
@@ -1067,7 +1329,7 @@ impl MapleWorkspaceView {
                     ))
                     .child(qa_btn(
                         "qa-exec-all",
-                        "!!!",
+                        "!!! Run All",
                         true,
                         cx.listener(|this, _, window, cx| {
                             this.execute_worksheet(&ExecuteWorksheet, window, cx);
@@ -1075,7 +1337,7 @@ impl MapleWorkspaceView {
                     ))
                     .child(qa_btn(
                         "qa-exec-one",
-                        "!",
+                        "! Run Line",
                         true,
                         cx.listener(|this, _, window, cx| {
                             this.evaluate_input(&Evaluate, window, cx);
@@ -1098,6 +1360,7 @@ impl MapleWorkspaceView {
                             .rounded_sm()
                             .hover(|s| s.bg(rgb(0xcbd7e6)))
                             .cursor_pointer()
+                            .tooltip(make_tooltip("Reset worksheet zoom to 100% (Ctrl+0)"))
                             .text_xs()
                             .text_color(rgb(0x1e293b))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -1116,10 +1379,100 @@ impl MapleWorkspaceView {
             )
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x334155))
-                    .child(format!("{} — Maple Worksheet", self.current_tab().title)),
+                    .id("window-drag-strip")
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(64.))
+                    .px_3()
+                    .window_control_area(WindowControlArea::Drag)
+                    .cursor(CursorStyle::OpenHand)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                        if ev.click_count >= 2 {
+                            window.zoom_window();
+                        } else {
+                            window.start_window_move();
+                        }
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x334155))
+                            .child(format!("{} — Maple Worksheet", self.current_tab().title)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("win-minimize")
+                            .w(px(28.))
+                            .h(px(24.))
+                            .rounded_sm()
+                            .window_control_area(WindowControlArea::Min)
+                            .hover(|s| s.bg(rgb(0xcbd7e6)))
+                            .cursor_pointer()
+                            .tooltip(make_tooltip("Minimize window"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x1e293b))
+                            .on_click(|_, window, _| {
+                                window.minimize_window();
+                            })
+                            .child("─"),
+                    )
+                    .child(
+                        div()
+                            .id("win-maximize")
+                            .w(px(28.))
+                            .h(px(24.))
+                            .rounded_sm()
+                            .window_control_area(WindowControlArea::Max)
+                            .hover(|s| s.bg(rgb(0xcbd7e6)))
+                            .cursor_pointer()
+                            .tooltip(make_tooltip("Maximize / Restore window"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x1e293b))
+                            .on_click(|_, window, _| {
+                                window.zoom_window();
+                            })
+                            .child(max_icon),
+                    )
+                    .child(
+                        div()
+                            .id("win-close")
+                            .w(px(28.))
+                            .h(px(24.))
+                            .rounded_sm()
+                            .window_control_area(WindowControlArea::Close)
+                            .hover(|s| s.bg(rgb(0xdc2626)).text_color(rgb(0xffffff)))
+                            .cursor_pointer()
+                            .tooltip(make_tooltip("Close Maple Worksheet (Ctrl+Q)"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x1e293b))
+                            .on_click(|_, window, _| {
+                                window.remove_window();
+                            })
+                            .child("×"),
+                    ),
             )
     }
 
@@ -1134,7 +1487,7 @@ impl MapleWorkspaceView {
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
+            .gap_2()
             .child(div().flex().flex_row().items_center().gap_0p5().children(
                 MenuTab::ALL.into_iter().enumerate().map(|(idx, tab)| {
                     let active = self.active_menu == tab;
@@ -1155,6 +1508,10 @@ impl MapleWorkspaceView {
                         .text_color(if active { rgb(0x1d4ed8) } else { rgb(0x1e293b) })
                         .hover(|s| s.bg(rgb(0xf4f7fb)))
                         .cursor_pointer()
+                        .tooltip(make_tooltip(format!(
+                            "Open {} ribbon commands",
+                            tab.label()
+                        )))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.active_menu = tab;
                             window.focus(&this.focus_handle);
@@ -1163,6 +1520,21 @@ impl MapleWorkspaceView {
                         .child(tab.label())
                 }),
             ))
+            .child(
+                div()
+                    .id("menu-drag-strip")
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    .cursor(CursorStyle::OpenHand)
+                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                        if ev.click_count >= 2 {
+                            window.zoom_window();
+                        } else {
+                            window.start_window_move();
+                        }
+                    }),
+            )
             .child(
                 div()
                     .flex()
@@ -1181,6 +1553,7 @@ impl MapleWorkspaceView {
                             .text_xs()
                             .text_color(rgb(0x334155))
                             .cursor_pointer()
+                            .tooltip(make_tooltip("Show or hide the Palettes & Workbook dock"))
                             .hover(|s| s.bg(rgb(0xf1f5f9)))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.left_dock_open = !this.left_dock_open;
@@ -1204,6 +1577,7 @@ impl MapleWorkspaceView {
                             .text_xs()
                             .text_color(rgb(0x334155))
                             .cursor_pointer()
+                            .tooltip(make_tooltip("Show or hide the Context Panel dock"))
                             .hover(|s| s.bg(rgb(0xf1f5f9)))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.right_dock_open = !this.right_dock_open;
@@ -1322,7 +1696,7 @@ impl MapleWorkspaceView {
         .child(ribbon_sep())
         .child(ribbon_btn(
             "hom-exec-ws",
-            "!!!",
+            "[!!!]",
             "Execute Worksheet",
             rgb(0x1d4ed8),
             cx.listener(|this, _, window, cx| {
@@ -1331,7 +1705,7 @@ impl MapleWorkspaceView {
         ))
         .child(ribbon_btn(
             "hom-exec-sel",
-            "!",
+            "[!]",
             "Execute Selection",
             rgb(0x2563eb),
             cx.listener(|this, _, window, cx| {
@@ -1375,6 +1749,13 @@ impl MapleWorkspaceView {
             "New Worksheet (Ctrl+N)",
             rgb(0x1d4ed8),
             cx.listener(|this, _, window, cx| this.open_starter_worksheet(None, window, cx)),
+        ))
+        .child(ribbon_btn(
+            "file-open",
+            "📂",
+            "Open Saved (.mpl / .mw)",
+            rgb(0x2563eb),
+            cx.listener(|this, _, window, cx| this.open_saved_worksheet(window, cx)),
         ))
         .child(ribbon_btn(
             "file-sample",
@@ -1633,7 +2014,7 @@ impl MapleWorkspaceView {
     fn render_evaluation_ribbon(&self, row: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         row.child(ribbon_btn(
             "ev-all",
-            "!!!",
+            "[!!!]",
             "Execute Worksheet",
             rgb(0x1d4ed8),
             cx.listener(|this, _, window, cx| {
@@ -1642,7 +2023,7 @@ impl MapleWorkspaceView {
         ))
         .child(ribbon_btn(
             "ev-sel",
-            "!",
+            "[!]",
             "Execute Selection",
             rgb(0x2563eb),
             cx.listener(|this, _, window, cx| this.evaluate_input(&Evaluate, window, cx)),
@@ -1749,46 +2130,65 @@ impl MapleWorkspaceView {
     }
 
     fn render_education_ribbon(&self, row: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
-        let demos = [
-            (
-                "edu-dq",
-                "lim",
-                "Difference Quotient",
-                "limit((sin(x + h) - sin(x))/h, h = 0);",
-            ),
-            (
-                "edu-ibp",
-                "∫",
-                "Integration by Parts",
-                "int(x * exp(x), x);",
-            ),
-            (
-                "edu-rref",
-                "⊞",
-                "3x4 Augmented RREF",
-                "rref(Matrix([[1, 2, -1, -4], [2, 3, -1, -11], [-2, 0, -3, 22]]));",
-            ),
-            (
-                "edu-mac",
-                "📈",
-                "Sin vs Maclaurin",
-                "plot([sin(x), x - x^3/6 + x^5/120], x = -Pi..Pi);",
-            ),
-        ];
-        let mut r = row;
-        for (id, icon, label, cmd) in demos {
-            r = r.child(ribbon_btn(
-                id,
-                icon,
-                label,
-                rgb(0x0f766e),
-                cx.listener(move |this, _, window, cx| {
-                    this.run_statement_in_active_tab(cmd, false, cx);
-                    window.focus(&this.focus_handle);
-                }),
-            ));
-        }
-        r
+        row.child(ribbon_btn(
+            "edu-guides",
+            "📘",
+            "Study Guides",
+            rgb(0x1d4ed8),
+            cx.listener(|this, _, window, cx| this.open_study_guide_tab(0, window, cx)),
+        ))
+        .child(ribbon_btn(
+            "edu-precalc",
+            "|x|",
+            "Precalculus (Inequalities)",
+            rgb(0x0f766e),
+            cx.listener(|this, _, window, cx| this.open_study_guide_tab(0, window, cx)),
+        ))
+        .child(ribbon_btn(
+            "edu-deplot",
+            "dy/dx",
+            "DEtools[DEplot] Tutor",
+            rgb(0x7c3aed),
+            cx.listener(|this, _, window, cx| this.open_deplot_tutor_tab(window, cx)),
+        ))
+        .child(ribbon_btn(
+            "edu-calc1",
+            "∫x",
+            "Calculus — Single Variable",
+            rgb(0x059669),
+            cx.listener(|this, _, window, cx| this.open_study_guide_tab(1, window, cx)),
+        ))
+        .child(ribbon_btn(
+            "edu-calc3d",
+            "🧊",
+            "3D Surface Plot Demo",
+            rgb(0x2563eb),
+            cx.listener(|this, _, window, cx| {
+                this.run_statement_in_active_tab(
+                    "plot3d(sin(x)*cos(y), x = -Pi..Pi, y = -Pi..Pi);",
+                    false,
+                    cx,
+                );
+                window.focus(&this.focus_handle);
+            }),
+        ))
+        .child(ribbon_btn(
+            "edu-dsolve",
+            "y''",
+            "ODE dsolve Demo",
+            rgb(0xb91c1c),
+            cx.listener(|this, _, window, cx| {
+                this.run_statement_in_active_tab("dsolve(diff(y, x$2) + y = 0, y);", false, cx);
+                window.focus(&this.focus_handle);
+            }),
+        ))
+        .child(ribbon_btn(
+            "edu-help",
+            "🎓",
+            "Student Help Center",
+            rgb(0x334155),
+            cx.listener(|this, _, window, cx| this.open_help_browser_tab(0, window, cx)),
+        ))
     }
 
     fn render_workbook_ribbon(&self, row: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
@@ -1828,10 +2228,24 @@ impl MapleWorkspaceView {
 
     fn render_help_ribbon(&self, row: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         row.child(ribbon_btn(
+            "hlp-browser",
+            "📖",
+            "Maple 2025 Help",
+            rgb(0x1d4ed8),
+            cx.listener(|this, _, window, cx| this.open_help_browser_tab(0, window, cx)),
+        ))
+        .child(ribbon_btn(
+            "hlp-guides",
+            "📘",
+            "Study Guides Reference",
+            rgb(0x0f766e),
+            cx.listener(|this, _, window, cx| this.open_study_guide_tab(0, window, cx)),
+        ))
+        .child(ribbon_btn(
             "hlp-tour",
             "?",
             "Open Sample Tour",
-            rgb(0x1d4ed8),
+            rgb(0x2563eb),
             cx.listener(|this, _, window, cx| {
                 this.open_starter_worksheet(Some("calculus"), window, cx);
             }),
@@ -1858,6 +2272,7 @@ impl MapleWorkspaceView {
         div()
             .w(px(274.))
             .h_full()
+            .min_h_0()
             .bg(rgb(0xf8fafc))
             .border_r_1()
             .border_color(rgb(0xd4dde7))
@@ -1896,15 +2311,18 @@ impl MapleWorkspaceView {
                     .id("left-dock-scroll")
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .overflow_y_scroll()
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(match self.left_dock_tab {
-                        LeftDockTab::Palettes => self.render_palettes_pane(cx).into_any_element(),
-                        LeftDockTab::Workbook => self.render_workbook_pane(cx).into_any_element(),
-                    }),
+                    .child(div().w_full().p_2().pb_6().flex().flex_col().gap_2().child(
+                        match self.left_dock_tab {
+                            LeftDockTab::Palettes => {
+                                self.render_palettes_pane(cx).into_any_element()
+                            }
+                            LeftDockTab::Workbook => {
+                                self.render_workbook_pane(cx).into_any_element()
+                            }
+                        },
+                    )),
             )
     }
 
@@ -2344,12 +2762,122 @@ impl MapleWorkspaceView {
             ("Series & Limits Worksheet", "series"),
             ("2D Plotting Worksheet", "plot"),
         ];
+        let mut vars: Vec<(String, String)> = Vec::new();
+        if let Some(ws) = self.current_tab().worksheet() {
+            for (k, v) in &ws.env.variables {
+                vars.push((k.clone(), v.to_string()));
+            }
+            for (name, f) in &ws.env.functions {
+                vars.push((
+                    name.clone(),
+                    format!("({}) -> {}", f.params.join(", "), f.body),
+                ));
+            }
+        }
 
         div()
             .flex()
             .flex_col()
             .gap_3()
             .p_1()
+            .child(
+                div()
+                    .rounded_md()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0xd4dde7))
+                    .p_2p5()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x334155))
+                            .child("▾ Navigator"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x475569))
+                            .child("This file is not a workbook. Save the file as a workbook in order to use the navigator."),
+                    )
+                    .child(
+                        div()
+                            .id("wb-save-as")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(0xeaf0f6))
+                            .border_1()
+                            .border_color(rgb(0xcbd5e1))
+                            .hover(|s| s.bg(rgb(0xdbeafe)).border_color(rgb(0x93c5fd)))
+                            .cursor_pointer()
+                            .tooltip(make_tooltip("Save active worksheet script into ./worksheets"))
+                            .flex()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x0f172a))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.save_active_worksheet(cx);
+                            }))
+                            .child("Save As Workbook"),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_md()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0xd4dde7))
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x334155))
+                            .child("▾ Variables"),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .py_0p5()
+                            .border_b_1()
+                            .border_color(rgb(0xe2e8f0))
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x64748b))
+                            .child("Variable")
+                            .child("Value"),
+                    )
+                    .when(vars.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child("No variables assigned yet."),
+                        )
+                    })
+                    .children(vars.into_iter().take(12).map(|(k, v)| {
+                        div()
+                            .px_1()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x1e293b)).child(k))
+                            .child(div().text_color(rgb(0x475569)).child(v))
+                    })),
+            )
             .child(
                 div()
                     .flex()
@@ -2447,6 +2975,7 @@ impl MapleWorkspaceView {
             .flex_1()
             .h_full()
             .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .bg(rgb(0xeef2f6))
@@ -2466,42 +2995,53 @@ impl MapleWorkspaceView {
                         let active = idx == self.active_tab;
                         let closable = idx > 0;
                         div()
-                            .id(("doc-tab", tab.id))
                             .h(px(28.))
-                            .px_2p5()
                             .rounded_t_md()
                             .bg(if active { rgb(0xffffff) } else { rgb(0xdbe3ec) })
                             .border_t_1()
                             .border_l_1()
                             .border_r_1()
                             .border_color(if active { rgb(0xcbd5e1) } else { rgb(0xd4dde7) })
-                            .cursor_pointer()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.active_tab = idx;
-                                window.focus(&this.focus_handle);
-                                cx.notify();
-                            }))
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(if active {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::NORMAL
-                                    })
-                                    .text_color(rgb(0x0f172a))
-                                    .child(tab.title.clone()),
+                                    .id(("doc-tab-select", tab.id))
+                                    .px_2p5()
+                                    .h_full()
+                                    .cursor_pointer()
+                                    .tooltip(make_tooltip(format!("Switch to {}", tab.title)))
+                                    .flex()
+                                    .items_center()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if idx < this.tabs.len() {
+                                            this.active_tab = idx;
+                                        }
+                                        window.focus(&this.focus_handle);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(if active {
+                                                FontWeight::SEMIBOLD
+                                            } else {
+                                                FontWeight::NORMAL
+                                            })
+                                            .text_color(rgb(0x0f172a))
+                                            .child(tab.title.clone()),
+                                    ),
                             )
                             .when(closable, |el| {
                                 el.child(
                                     div()
                                         .id(("doc-close", tab.id))
+                                        .mr_1()
                                         .px_1()
                                         .rounded_sm()
+                                        .cursor_pointer()
+                                        .tooltip(make_tooltip("Close tab (Ctrl+W)"))
                                         .text_xs()
                                         .text_color(rgb(0x64748b))
                                         .hover(|s| s.bg(rgb(0xfee2e2)).text_color(rgb(0xb91c1c)))
@@ -2521,6 +3061,7 @@ impl MapleWorkspaceView {
                             .rounded_sm()
                             .hover(|s| s.bg(rgb(0xcbd5e1)))
                             .cursor_pointer()
+                            .tooltip(make_tooltip("Open a new worksheet tab (Ctrl+N)"))
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0x334155))
@@ -2535,6 +3076,20 @@ impl MapleWorkspaceView {
                 DocumentContent::Worksheet(ws) => {
                     self.render_worksheet_document(ws, cx).into_any_element()
                 }
+                DocumentContent::DePlotTutor {
+                    preset_idx,
+                    x0,
+                    y0,
+                    show_arrows,
+                } => self
+                    .render_deplot_tutor(*preset_idx, *x0, *y0, *show_arrows, cx)
+                    .into_any_element(),
+                DocumentContent::StudyGuide { chapter_idx } => {
+                    self.render_study_guide(*chapter_idx, cx).into_any_element()
+                }
+                DocumentContent::HelpBrowser { article_idx } => self
+                    .render_help_browser(*article_idx, cx)
+                    .into_any_element(),
             })
     }
 
@@ -2570,14 +3125,20 @@ impl MapleWorkspaceView {
             .id("start-page-scroll")
             .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_y_scroll()
-            .p_6()
-            .flex()
-            .justify_center()
             .child(
                 div()
                     .w_full()
-                    .max_w(px(780.))
+                    .p_6()
+                    .pb_12()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(780.))
                     .rounded_lg()
                     .bg(rgb(0xffffff))
                     .border_1()
@@ -2759,6 +3320,7 @@ impl MapleWorkspaceView {
                                     )),
                             ),
                     ),
+                ),
             )
     }
 
@@ -2788,16 +3350,22 @@ impl MapleWorkspaceView {
             .id("worksheet-doc-scroll")
             .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_y_scroll()
             .track_scroll(&tab.scroll_handle)
-            .p_5()
-            .flex()
-            .justify_center()
             .child(
                 div()
                     .w_full()
-                    .max_w(px(900.))
-                    .min_h(px(640.))
+                    .p_5()
+                    .pb_12()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(900.))
+                            .min_h(px(640.))
                     .rounded_md()
                     .bg(rgb(0xffffff))
                     .border_1()
@@ -2858,6 +3426,19 @@ impl MapleWorkspaceView {
                                             .text_size(px(14.0 * zoom))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(0x991b1b))
+                                            .when_some(tab.editing_cell, |el, edit_i| {
+                                                el.child(
+                                                    div()
+                                                        .mr_2()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(rgb(0xfef3c7))
+                                                        .text_xs()
+                                                        .text_color(rgb(0x92400e))
+                                                        .child(format!("Editing ({})", edit_i + 1)),
+                                                )
+                                            })
                                             .child(before)
                                             .child(div().w(px(2.)).h(px(17. * zoom)).bg(rgb(0x991b1b)))
                                             .child(if is_empty {
@@ -2880,16 +3461,18 @@ impl MapleWorkspaceView {
                                             .bg(rgb(0x1d4ed8))
                                             .hover(|s| s.bg(rgb(0x1e40af)))
                                             .cursor_pointer()
+                                            .tooltip(make_tooltip("Evaluate current prompt and advance (Enter)"))
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(0xffffff))
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.evaluate_input(&Evaluate, window, cx);
                                             }))
-                                            .child("!"),
+                                            .child("Run ↵"),
                                     ),
                             ),
                     ),
+            ),
             )
     }
 
@@ -2902,6 +3485,7 @@ impl MapleWorkspaceView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let cell_input = cell.input.clone();
+        let edit_cell_input = cell.input.clone();
         let copy_in_str = cell.input.clone();
         let copy_out_str = cell_output_clipboard_text(cell);
         let latex_str = cell
@@ -2993,6 +3577,23 @@ impl MapleWorkspaceView {
                                     .items_center()
                                     .gap_1()
                                     .child(cell_pill(
+                                        ("edit-cell", idx),
+                                        "Edit",
+                                        cx.listener(move |this, _, window, cx| {
+                                            let t = this.current_tab_mut();
+                                            t.editing_cell = Some(idx);
+                                            t.selected_cell = Some(idx);
+                                            t.input = edit_cell_input.clone();
+                                            t.cursor = t.input.len();
+                                            this.status_message = format!(
+                                                "Editing cell {} — modify prompt below and press Enter",
+                                                idx + 1
+                                            );
+                                            window.focus(&this.focus_handle);
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(cell_pill(
                                         ("cp-in", idx),
                                         "Copy In",
                                         cx.listener(move |this, _, _window, cx| {
@@ -3060,7 +3661,7 @@ impl MapleWorkspaceView {
                                         .flex()
                                         .justify_center()
                                         .items_center()
-                                        .child(render_2d_cell_output(cell, zoom)),
+                                        .child(self.render_2d_cell_output(cell, zoom, cx)),
                                 )
                                 .child(
                                     div()
@@ -3107,18 +3708,30 @@ impl MapleWorkspaceView {
         ];
 
         div()
-            .id("right-dock-scroll")
             .w(px(256.))
             .h_full()
-            .overflow_y_scroll()
+            .min_h_0()
             .bg(rgb(0xf8fafc))
             .border_l_1()
             .border_color(rgb(0xd4dde7))
-            .p_2p5()
             .flex()
             .flex_col()
-            .gap_3()
-            // Live 2D Plot preview card matching Maple 2025 right dock
+            .child(
+                div()
+                    .id("right-dock-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .p_2p5()
+                            .pb_8()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            // Live 2D Plot preview card matching Maple 2025 right dock
             .when_some(preview_card, |el, (plot, expr_label)| {
                 el.child(
                     div()
@@ -3294,6 +3907,8 @@ impl MapleWorkspaceView {
                                     .child(key),
                             )
                     })),
+            ),
+            ),
             )
     }
 
@@ -3351,7 +3966,7 @@ impl MapleWorkspaceView {
 }
 
 impl Render for MapleWorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::evaluate_input))
@@ -3382,7 +3997,7 @@ impl Render for MapleWorkspaceView {
             .flex()
             .flex_col()
             .bg(rgb(0xeef2f6))
-            .child(self.render_quick_access_bar(cx))
+            .child(self.render_quick_access_bar(window, cx))
             .child(self.render_menu_strip(cx))
             .child(self.render_ribbon(cx))
             .child(
@@ -3449,8 +4064,71 @@ fn cell_output_clipboard_text(cell: &WorksheetCell) -> Option<String> {
                 .join(", ")
         )),
         CellOutput::Plot(p) => Some(p.title.clone()),
+        CellOutput::Plot3d(s) => Some(s.title.clone()),
         CellOutput::Suppressed => None,
         CellOutput::Error(e) => Some(e.clone()),
+    }
+}
+
+struct TooltipView {
+    text: String,
+}
+
+impl Render for TooltipView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x0f172a))
+            .border_1()
+            .border_color(rgb(0x334155))
+            .shadow_md()
+            .text_xs()
+            .text_color(rgb(0xf8fafc))
+            .child(self.text.clone())
+    }
+}
+
+fn make_tooltip(text: impl Into<String>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_window, cx| cx.new(|_| TooltipView { text: text.clone() }).into()
+}
+
+fn qa_tooltip(id: &str, _label: &str) -> &'static str {
+    match id {
+        "qa-new" => "Open a new blank Maple worksheet tab (Ctrl+N)",
+        "qa-save" => "Export active worksheet to a .mpl script in ~/Documents",
+        "qa-copy" => "Copy current prompt or selected output (Ctrl+C)",
+        "qa-paste" => "Paste from clipboard into the active prompt (Ctrl+V)",
+        "qa-undo" => "Undo last prompt edit (Ctrl+Z)",
+        "qa-redo" => "Redo reverted prompt edit (Ctrl+Y)",
+        "qa-mode" => "Switch between 2D Math input and Text mode (F5)",
+        "qa-exec-all" => {
+            "Re-evaluate every execution group in the active worksheet (Ctrl+Shift+Enter)"
+        }
+        "qa-exec-one" => "Evaluate the current input line in the active worksheet (Enter)",
+        "qa-zoom-out" => "Decrease worksheet text and output magnification (Ctrl+-)",
+        "qa-zoom-in" => "Increase worksheet text and output magnification (Ctrl+=)",
+        _ => "Worksheet toolbar action",
+    }
+}
+
+fn ribbon_tooltip(id: &str, label: &str) -> String {
+    match id {
+        "hom-exec-ws" | "ev-all" => {
+            "Execute all worksheet prompts sequentially from top to bottom (Ctrl+Shift+Enter)"
+                .to_string()
+        }
+        "hom-exec-sel" | "ev-sel" => {
+            "Evaluate the current input prompt and display typeset output (Enter)".to_string()
+        }
+        "hom-exec-code" => "Evaluate the active code/math expression now".to_string(),
+        "hom-restart" | "ev-rst" => {
+            "Clear all kernel variables and re-initialize a fresh session (Ctrl+R)".to_string()
+        }
+        "hom-startup" => "Define a sample symbolic helper function f := x^3 * sin(x)".to_string(),
+        _ => label.to_string(),
     }
 }
 
@@ -3465,6 +4143,7 @@ fn qa_btn(
         .px_1p5()
         .py_0p5()
         .rounded_sm()
+        .tooltip(make_tooltip(qa_tooltip(id, label)))
         .when(enabled, |el| {
             el.hover(|s| s.bg(rgb(0xcbd7e6)))
                 .cursor_pointer()
@@ -3500,6 +4179,7 @@ fn ribbon_btn(
         .border_color(rgb(0xd4dde7))
         .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
         .cursor_pointer()
+        .tooltip(make_tooltip(ribbon_tooltip(id, label)))
         .flex()
         .flex_row()
         .items_center()
@@ -3520,6 +4200,14 @@ fn cell_pill(
     label: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let tip = match label {
+        "Copy In" => "Copy this Maple input command to clipboard",
+        "Copy Out" => "Copy formatted evaluation output to clipboard",
+        "LaTeX" => "Copy LaTeX representation of this result",
+        "Edit" => "Edit this historical prompt in place",
+        "Delete" => "Delete this execution cell from the worksheet",
+        _ => "Cell action",
+    };
     div()
         .id(id)
         .px_1p5()
@@ -3530,6 +4218,7 @@ fn cell_pill(
         .border_color(rgb(0xe2e8f0))
         .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
         .cursor_pointer()
+        .tooltip(make_tooltip(tip))
         .text_xs()
         .text_color(rgb(0x475569))
         .on_click(on_click)
@@ -3682,39 +4371,776 @@ fn matrix_stepper(
         )
 }
 
-fn render_2d_cell_output(cell: &WorksheetCell, zoom: f32) -> gpui::AnyElement {
-    match &cell.output {
-        CellOutput::Plot(plot) => render_plot(plot).into_any_element(),
-        CellOutput::Error(err) => div()
-            .p_2()
-            .rounded_sm()
-            .bg(rgb(0xfef2f2))
-            .border_1()
-            .border_color(rgb(0xfecaca))
-            .text_sm()
-            .text_color(rgb(0xb91c1c))
-            .child(format!("Error: {err}"))
-            .into_any_element(),
-        CellOutput::Suppressed => div().into_any_element(),
-        CellOutput::MatrixGrid(_) | CellOutput::Text(_) => {
-            if let Some(expr) = &cell.result_expr {
-                let node = render_2d_math_node(expr, 0, false, zoom);
-                if let Some(name) = &cell.assigned_name {
+impl MapleWorkspaceView {
+    fn render_2d_cell_output(
+        &self,
+        cell: &WorksheetCell,
+        zoom: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        match &cell.output {
+            CellOutput::Plot(plot) => self
+                .render_plot_card(cell.index, plot, cx)
+                .into_any_element(),
+            CellOutput::Plot3d(surf) => self
+                .render_plot3d_card(cell.index, surf, cx)
+                .into_any_element(),
+            CellOutput::Error(err) => div()
+                .p_2()
+                .rounded_sm()
+                .bg(rgb(0xfef2f2))
+                .border_1()
+                .border_color(rgb(0xfecaca))
+                .text_sm()
+                .text_color(rgb(0xb91c1c))
+                .child(format!("Error: {err}"))
+                .into_any_element(),
+            CellOutput::Suppressed => div().into_any_element(),
+            CellOutput::MatrixGrid(_) | CellOutput::Text(_) => {
+                if let Some(expr) = &cell.result_expr {
+                    let node = render_2d_math_node(expr, 0, false, zoom);
+                    if let Some(name) = &cell.assigned_name {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(math_span(format!("{name} :="), zoom))
+                            .child(node)
+                            .into_any_element()
+                    } else {
+                        node
+                    }
+                } else {
+                    math_span(cell.formatted_output(), zoom)
+                }
+            }
+        }
+    }
+
+    fn render_plot_card(
+        &self,
+        cell_index: usize,
+        plot: &PlotData,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let palette = [rgb(0x2563eb), rgb(0xdc2626), rgb(0x059669), rgb(0xd97706)];
+        let tab = self.current_tab();
+        let zoom_f = tab.plot2d_zoom.max(0.2);
+        let pan_x = tab.plot2d_pan_x;
+
+        let x_mid = 0.5 * (plot.x_min + plot.x_max) + pan_x;
+        let half_x = 0.5 * (plot.x_max - plot.x_min) / zoom_f;
+        let y_mid = 0.5 * (plot.y_min + plot.y_max);
+        let half_y = 0.5 * (plot.y_max - plot.y_min) / zoom_f;
+
+        let mut view_plot = plot.clone();
+        view_plot.x_min = x_mid - half_x;
+        view_plot.x_max = x_mid + half_x;
+        view_plot.y_min = y_mid - half_y;
+        view_plot.y_max = y_mid + half_y;
+        let plot_data = view_plot.clone();
+
+        div()
+            .w_full()
+            .max_w(px(640.))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x334155))
+                            .child(plot.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(cell_pill(
+                                ("p2-zin", cell_index),
+                                "Zoom +",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot2d_zoom = (t.plot2d_zoom * 1.25).min(8.0);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p2-zout", cell_index),
+                                "Zoom -",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot2d_zoom = (t.plot2d_zoom / 1.25).max(0.25);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p2-panl", cell_index),
+                                "←",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot2d_pan_x -= 0.75 / t.plot2d_zoom;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p2-panr", cell_index),
+                                "→",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot2d_pan_x += 0.75 / t.plot2d_zoom;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p2-rst", cell_index),
+                                "Reset",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot2d_zoom = 1.0;
+                                    t.plot2d_pan_x = 0.0;
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
+            )
+            .child(div().flex().flex_row().flex_wrap().gap_3().children(
+                plot.series.iter().enumerate().map(|(i, s)| {
+                    let color = palette[i % palette.len()];
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(math_span(format!("{name} :="), zoom))
-                        .child(node)
-                        .into_any_element()
-                } else {
-                    node
-                }
-            } else {
-                math_span(cell.formatted_output(), zoom)
-            }
-        }
+                        .child(div().w(px(10.)).h(px(3.)).bg(color))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x475569))
+                                .child(s.name.clone()),
+                        )
+                }),
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(230.))
+                    .rounded_md()
+                    .bg(rgb(0xf8fafc))
+                    .border_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .child(
+                        canvas(
+                            move |_bounds, _window, _cx| plot_data.clone(),
+                            move |bounds, data, window, _cx| {
+                                paint_plot_canvas(bounds, &data, &palette, window, 2.0, 16.0);
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child(format!(
+                        "{} in [{:.3}, {:.3}]",
+                        view_plot.x_label, view_plot.x_min, view_plot.x_max
+                    ))
+                    .child(format!(
+                        "y in [{:.3}, {:.3}]",
+                        view_plot.y_min, view_plot.y_max
+                    )),
+            )
+    }
+
+    fn render_plot3d_card(
+        &self,
+        cell_index: usize,
+        surf: &Plot3dData,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tab = self.current_tab();
+        let yaw = tab.plot3d_yaw_deg;
+        let pitch = tab.plot3d_pitch_deg;
+        let surf_data = surf.clone();
+
+        div()
+            .w_full()
+            .max_w(px(640.))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x334155))
+                            .child(format!(
+                                "3D Surface: {} (yaw {:.0}°, pitch {:.0}°)",
+                                surf.title, yaw, pitch
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(cell_pill(
+                                ("p3-yl", cell_index),
+                                "⟲",
+                                cx.listener(|this, _, _window, cx| {
+                                    this.current_tab_mut().plot3d_yaw_deg -= 15.0;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p3-yr", cell_index),
+                                "⟳",
+                                cx.listener(|this, _, _window, cx| {
+                                    this.current_tab_mut().plot3d_yaw_deg += 15.0;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p3-pu", cell_index),
+                                "↑",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot3d_pitch_deg = (t.plot3d_pitch_deg + 10.0).min(80.0);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p3-pd", cell_index),
+                                "↓",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot3d_pitch_deg = (t.plot3d_pitch_deg - 10.0).max(-20.0);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(cell_pill(
+                                ("p3-rst", cell_index),
+                                "Reset View",
+                                cx.listener(|this, _, _window, cx| {
+                                    let t = this.current_tab_mut();
+                                    t.plot3d_yaw_deg = 42.0;
+                                    t.plot3d_pitch_deg = 26.0;
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(260.))
+                    .rounded_md()
+                    .bg(rgb(0xf8fafc))
+                    .border_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .child(
+                        canvas(
+                            move |_bounds, _window, _cx| (surf_data.clone(), yaw, pitch),
+                            move |bounds, (data, yaw_deg, pitch_deg), window, _cx| {
+                                paint_plot3d_canvas(bounds, &data, yaw_deg, pitch_deg, window);
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child(format!(
+                        "{} in [{:.2}, {:.2}], {} in [{:.2}, {:.2}]",
+                        surf.x_label, surf.x_min, surf.x_max, surf.y_label, surf.y_min, surf.y_max
+                    ))
+                    .child(format!("z in [{:.3}, {:.3}]", surf.z_min, surf.z_max)),
+            )
+    }
+
+    fn render_deplot_tutor(
+        &self,
+        preset_idx: usize,
+        x0: f64,
+        y0: f64,
+        show_arrows: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let presets = de_presets();
+        let scene = simulate_de_scene(preset_idx, x0, y0);
+        let scene_paint = scene.clone();
+
+        div()
+            .id("deplot-scroll")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .w_full()
+                    .p_5()
+                    .pb_12()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(900.))
+                            .rounded_md()
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xd4dde7))
+                            .p_6()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x0f172a))
+                                            .child("DEtools[DEplot][interactive] — Differential Equation Phase Tutor"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x475569))
+                                            .child(format!("{} | {}", scene.preset.eq1, scene.preset.eq2)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .gap_1p5()
+                                    .children(presets.iter().enumerate().map(|(idx, p)| {
+                                        let active = idx == preset_idx;
+                                        let ic = p.default_ic;
+                                        div()
+                                            .id(("de-preset", idx))
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(if active { rgb(0x1d4ed8) } else { rgb(0xf1f5f9) })
+                                            .border_1()
+                                            .border_color(if active { rgb(0x1e40af) } else { rgb(0xcbd5e1) })
+                                            .cursor_pointer()
+                                            .tooltip(make_tooltip(format!("{} ({})", p.name, p.eq2)))
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if active { rgb(0xffffff) } else { rgb(0x1e293b) })
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                if let DocumentContent::DePlotTutor {
+                                                    preset_idx: ref mut pi,
+                                                    x0: ref mut cx0,
+                                                    y0: ref mut cy0,
+                                                    ..
+                                                } = this.current_tab_mut().content
+                                                {
+                                                    *pi = idx;
+                                                    *cx0 = ic.0;
+                                                    *cy0 = ic.1;
+                                                }
+                                                this.status_message = format!("Selected DE system: {}", p.name);
+                                                cx.notify();
+                                            }))
+                                            .child(p.name)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x334155)).child(format!("Initial condition: x(0) = {:.2}, v(0) = {:.2}", x0, y0)))
+                                    .child(cell_pill(("de-x0m", 0), "x0 -", cx.listener(|this, _, _, cx| {
+                                        if let DocumentContent::DePlotTutor { x0: ref mut x, .. } = this.current_tab_mut().content { *x -= 0.3; }
+                                        cx.notify();
+                                    })))
+                                    .child(cell_pill(("de-x0p", 0), "x0 +", cx.listener(|this, _, _, cx| {
+                                        if let DocumentContent::DePlotTutor { x0: ref mut x, .. } = this.current_tab_mut().content { *x += 0.3; }
+                                        cx.notify();
+                                    })))
+                                    .child(cell_pill(("de-y0m", 0), "v0 -", cx.listener(|this, _, _, cx| {
+                                        if let DocumentContent::DePlotTutor { y0: ref mut y, .. } = this.current_tab_mut().content { *y -= 0.3; }
+                                        cx.notify();
+                                    })))
+                            .child(cell_pill(("de-y0p", 0), "v0 +", cx.listener(|this, _, _, cx| {
+                                if let DocumentContent::DePlotTutor { y0: ref mut y, .. } = this.current_tab_mut().content { *y += 0.3; }
+                                cx.notify();
+                            })))
+                                    .child(cell_pill(("de-arr", 0), if show_arrows { "Hide Field" } else { "Show Field" }, cx.listener(|this, _, _, cx| {
+                                        if let DocumentContent::DePlotTutor { show_arrows: ref mut s, .. } = this.current_tab_mut().content { *s = !*s; }
+                                        cx.notify();
+                                    })))
+                                    .child(cell_pill(("de-solve", 0), "Run dsolve in Worksheet", cx.listener(|this, _, window, cx| {
+                                        let cmd = "dsolve(diff(y, x$2) + y = 0, y);";
+                                        this.open_new_worksheet_tab(None);
+                                        this.run_statement_in_active_tab(cmd, true, cx);
+                                        window.focus(&this.focus_handle);
+                                    }))),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(360.))
+                                    .rounded_md()
+                                    .bg(rgb(0xf8fafc))
+                                    .border_1()
+                                    .border_color(rgb(0xcbd5e1))
+                                    .child(
+                                        canvas(
+                                            move |_bounds, _window, _cx| (scene_paint.clone(), show_arrows),
+                                            move |bounds, (sc, arrows), window, _cx| {
+                                                paint_de_scene_canvas(bounds, &sc, arrows, window);
+                                            },
+                                        )
+                                        .size_full(),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_study_guide(
+        &self,
+        chapter_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let chapters = study_guide_chapters();
+        let chapter = chapters.get(chapter_idx).unwrap_or(&chapters[0]);
+
+        div()
+            .id("study-guide-scroll")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .w_full()
+                    .p_5()
+                    .pb_12()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(880.))
+                            .rounded_md()
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xd4dde7))
+                            .p_7()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(div().flex().flex_row().flex_wrap().gap_1p5().children(
+                                chapters.iter().enumerate().map(|(i, c)| {
+                                    let active = i == chapter_idx;
+                                    div()
+                                        .id(("sg-chap", i))
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(if active { rgb(0x1d4ed8) } else { rgb(0xf1f5f9) })
+                                        .border_1()
+                                        .border_color(if active {
+                                            rgb(0x1e40af)
+                                        } else {
+                                            rgb(0xcbd5e1)
+                                        })
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(if active {
+                                            rgb(0xffffff)
+                                        } else {
+                                            rgb(0x1e293b)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            if let DocumentContent::StudyGuide {
+                                                chapter_idx: ref mut ci,
+                                            } = this.current_tab_mut().content
+                                            {
+                                                *ci = i;
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(c.guide)
+                                }),
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x0f172a))
+                                            .child(chapter.guide),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0x1d4ed8))
+                                            .child(chapter.title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x475569))
+                                            .child(chapter.intro),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0x0f172a))
+                                    .child("▾ Typical Problems"),
+                            )
+                            .children(chapter.problems.iter().enumerate().map(|(pi, prob)| {
+                                let cmd = prob.maple_cmd;
+                                div()
+                                    .p_2p5()
+                                    .rounded_md()
+                                    .bg(rgb(0xf8fafc))
+                                    .border_1()
+                                    .border_color(rgb(0xe2e8f0))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x0f172a))
+                                                    .child(format!(
+                                                        "{}.   {}",
+                                                        prob.number, prob.prompt_text
+                                                    )),
+                                            )
+                                            .child(
+                                                div().text_xs().text_color(rgb(0x64748b)).child(
+                                                    format!(
+                                                        "Hint: {}   Command: {}",
+                                                        prob.hint, prob.maple_cmd
+                                                    ),
+                                                ),
+                                            ),
+                                    )
+                                    .child(cell_pill(
+                                        ("sg-run", pi),
+                                        "Solve in Worksheet",
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.open_new_worksheet_tab(None);
+                                            this.run_statement_in_active_tab(cmd, true, cx);
+                                            window.focus(&this.focus_handle);
+                                        }),
+                                    ))
+                            })),
+                    ),
+            )
+    }
+
+    fn render_help_browser(
+        &self,
+        article_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let articles = help_articles();
+        let active = articles.get(article_idx).unwrap_or(&articles[0]);
+        let example = active.example_cmd;
+
+        div()
+            .id("help-scroll")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .w_full()
+                    .p_5()
+                    .pb_12()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(920.))
+                            .rounded_md()
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xd4dde7))
+                            .p_5()
+                            .flex()
+                            .flex_row()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .w(px(260.))
+                                    .border_r_1()
+                                    .border_color(rgb(0xe2e8f0))
+                                    .pr_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .pb_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x334155))
+                                            .child("Table of Contents"),
+                                    )
+                                    .children(articles.iter().enumerate().map(|(i, art)| {
+                                        let is_cur = i == article_idx;
+                                        div()
+                                            .id(("help-toc", i))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(if is_cur { rgb(0xdbeafe) } else { rgb(0xffffff) })
+                                            .hover(|s| s.bg(rgb(0xf1f5f9)))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                if let DocumentContent::HelpBrowser {
+                                                    article_idx: ref mut ai,
+                                                } = this.current_tab_mut().content
+                                                {
+                                                    *ai = i;
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x0f172a))
+                                                    .child(art.title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child(art.category),
+                                            )
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(0x1d4ed8))
+                                            .child(active.category),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x0f172a))
+                                            .child(active.title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0x334155))
+                                            .child(active.summary),
+                                    )
+                                    .child(
+                                        div()
+                                            .p_3()
+                                            .rounded_md()
+                                            .bg(rgb(0xf8fafc))
+                                            .border_1()
+                                            .border_color(rgb(0xcbd5e1))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x991b1b))
+                                                    .child(format!("[> {}", active.example_cmd)),
+                                            )
+                                            .child(cell_pill(
+                                                ("hlp-try", article_idx),
+                                                "Run Example",
+                                                cx.listener(move |this, _, window, cx| {
+                                                    this.open_new_worksheet_tab(None);
+                                                    this.run_statement_in_active_tab(
+                                                        example, true, cx,
+                                                    );
+                                                    window.focus(&this.focus_handle);
+                                                }),
+                                            )),
+                                    ),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -3972,6 +5398,15 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
             .child(math_span("=", zoom))
             .child(render_2d_math_node(rhs, 1, true, zoom))
             .into_any_element(),
+        Expr::Inequality(op, lhs, rhs) => div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(render_2d_math_node(lhs, 1, false, zoom))
+            .child(math_span(op.pretty().trim().to_string(), zoom))
+            .child(render_2d_math_node(rhs, 1, true, zoom))
+            .into_any_element(),
         Expr::Range(lhs, rhs) => div()
             .flex()
             .flex_row()
@@ -4065,80 +5500,6 @@ fn extract_2d_neg(expr: &Expr) -> Option<Expr> {
     }
 }
 
-fn render_plot(plot: &PlotData) -> impl IntoElement {
-    let palette = [rgb(0x2563eb), rgb(0xdc2626), rgb(0x059669), rgb(0xd97706)];
-    let plot_data = plot.clone();
-
-    div()
-        .w_full()
-        .max_w(px(640.))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x334155))
-                        .child(plot.title.clone()),
-                )
-                .child(div().flex().flex_row().gap_3().children(
-                    plot.series.iter().enumerate().map(|(i, s)| {
-                        let color = palette[i % palette.len()];
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .child(div().w(px(10.)).h(px(3.)).bg(color))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x475569))
-                                    .child(s.name.clone()),
-                            )
-                    }),
-                )),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(230.))
-                .rounded_md()
-                .bg(rgb(0xf8fafc))
-                .border_1()
-                .border_color(rgb(0xcbd5e1))
-                .child(
-                    canvas(
-                        move |_bounds, _window, _cx| plot_data.clone(),
-                        move |bounds, data, window, _cx| {
-                            paint_plot_canvas(bounds, &data, &palette, window, 2.0, 16.0);
-                        },
-                    )
-                    .size_full(),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .justify_between()
-                .text_xs()
-                .text_color(rgb(0x64748b))
-                .child(format!(
-                    "{} in [{:.3}, {:.3}]",
-                    plot.x_label, plot.x_min, plot.x_max
-                ))
-                .child(format!("y in [{:.3}, {:.3}]", plot.y_min, plot.y_max)),
-        )
-}
-
 fn paint_plot_canvas(
     bounds: Bounds<Pixels>,
     data: &PlotData,
@@ -4212,6 +5573,172 @@ fn paint_plot_canvas(
     }
 }
 
+fn paint_plot3d_canvas(
+    bounds: Bounds<Pixels>,
+    surf: &Plot3dData,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    window: &mut Window,
+) {
+    let w = f32::from(bounds.size.width).max(1.0);
+    let h = f32::from(bounds.size.height).max(1.0);
+    let cx = f32::from(bounds.left()) + 0.5 * w;
+    let cy = f32::from(bounds.top()) + 0.52 * h;
+    let scale = w.min(h) * 0.34;
+
+    let yaw = yaw_deg.to_radians();
+    let pitch = pitch_deg.to_radians();
+    let (sy, cy_a) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+
+    let x_mid = 0.5 * (surf.x_min + surf.x_max);
+    let y_mid = 0.5 * (surf.y_min + surf.y_max);
+    let z_mid = 0.5 * (surf.z_min + surf.z_max);
+    let x_half = (0.5 * (surf.x_max - surf.x_min)).max(1e-9);
+    let y_half = (0.5 * (surf.y_max - surf.y_min)).max(1e-9);
+    let z_half = (0.5 * (surf.z_max - surf.z_min)).max(1e-9);
+
+    let project = |x: f64, y: f64, z: f64| -> Option<(f32, f32, f64)> {
+        if !z.is_finite() {
+            return None;
+        }
+        let nx = (x - x_mid) / x_half;
+        let ny = (y - y_mid) / y_half;
+        let nz = (z - z_mid) / z_half;
+        let rx = nx * cy_a - ny * sy;
+        let ry = nx * sy + ny * cy_a;
+        let sx = cx + (rx as f32) * scale;
+        let sy_scr = cy - ((nz * cp + ry * sp) as f32) * scale * 0.85;
+        let zn = ((z - surf.z_min) / (2.0 * z_half)).clamp(0.0, 1.0);
+        Some((sx, sy_scr, zn))
+    };
+
+    // Paint colored mesh rows and columns.
+    for row in &surf.grid {
+        for pair in row.windows(2) {
+            if let (Some((x1, y1, z1)), Some((x2, y2, z2))) = (
+                project(pair[0].0, pair[0].1, pair[0].2),
+                project(pair[1].0, pair[1].1, pair[1].2),
+            ) {
+                let z_avg = 0.5 * (z1 + z2);
+                let color: Hsla = height_color(z_avg).into();
+                let mut pb = PathBuilder::stroke(px(1.5));
+                pb.move_to(point(px(x1), px(y1)));
+                pb.line_to(point(px(x2), px(y2)));
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        }
+    }
+    for c in 0..surf.cols {
+        for r in 0..surf.rows.saturating_sub(1) {
+            let p1 = surf.grid[r][c];
+            let p2 = surf.grid[r + 1][c];
+            if let (Some((x1, y1, z1)), Some((x2, y2, z2))) =
+                (project(p1.0, p1.1, p1.2), project(p2.0, p2.1, p2.2))
+            {
+                let z_avg = 0.5 * (z1 + z2);
+                let color: Hsla = height_color(z_avg).into();
+                let mut pb = PathBuilder::stroke(px(1.2));
+                pb.move_to(point(px(x1), px(y1)));
+                pb.line_to(point(px(x2), px(y2)));
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        }
+    }
+}
+
+fn height_color(t: f64) -> Rgba {
+    if t < 0.33 {
+        rgb(0x1d4ed8)
+    } else if t < 0.66 {
+        rgb(0x059669)
+    } else {
+        rgb(0xd97706)
+    }
+}
+
+fn paint_de_scene_canvas(
+    bounds: Bounds<Pixels>,
+    scene: &crate::tutor::DePlotScene,
+    show_arrows: bool,
+    window: &mut Window,
+) {
+    let pad = 20.0f32;
+    let left = f32::from(bounds.left()) + pad;
+    let right = f32::from(bounds.right()) - pad;
+    let top = f32::from(bounds.top()) + pad;
+    let bottom = f32::from(bounds.bottom()) - pad;
+    let w = (right - left).max(1.0);
+    let h = (bottom - top).max(1.0);
+    let (xmin, xmax) = scene.preset.x_range;
+    let (ymin, ymax) = scene.preset.y_range;
+    let xs = (xmax - xmin).max(1e-9);
+    let ys = (ymax - ymin).max(1e-9);
+
+    let mx = |x: f64| px(left + (((x - xmin) / xs) as f32) * w);
+    let my = |y: f64| px(bottom - (((y - ymin) / ys) as f32) * h);
+
+    if xmin <= 0.0 && 0.0 <= xmax {
+        window.paint_quad(fill(
+            Bounds::new(point(mx(0.0), px(top)), size(px(1.2), px(h))),
+            rgb(0x94a3b8),
+        ));
+    }
+    if ymin <= 0.0 && 0.0 <= ymax {
+        window.paint_quad(fill(
+            Bounds::new(point(px(left), my(0.0)), size(px(w), px(1.2))),
+            rgb(0x94a3b8),
+        ));
+    }
+
+    if show_arrows {
+        let arrow_col: Hsla = rgb(0x64748b).into();
+        let step_len = xs / 28.0;
+        let step_y = ys / 24.0;
+        for &(x, y, dx, dy) in &scene.field_arrows {
+            let mut pb = PathBuilder::stroke(px(1.1));
+            pb.move_to(point(
+                mx(x - 0.5 * step_len * dx),
+                my(y - 0.5 * step_y * dy),
+            ));
+            pb.line_to(point(
+                mx(x + 0.5 * step_len * dx),
+                my(y + 0.5 * step_y * dy),
+            ));
+            if let Ok(path) = pb.build() {
+                window.paint_path(path, arrow_col);
+            }
+        }
+    }
+
+    if scene.trajectory.len() >= 2 {
+        let traj_col: Hsla = rgb(0x2563eb).into();
+        let mut pb = PathBuilder::stroke(px(2.4));
+        for (i, &(x, y)) in scene.trajectory.iter().enumerate() {
+            let p = point(mx(x), my(y));
+            if i == 0 {
+                pb.move_to(p);
+            } else {
+                pb.line_to(p);
+            }
+        }
+        if let Ok(path) = pb.build() {
+            window.paint_path(path, traj_col);
+        }
+        window.paint_quad(fill(
+            Bounds::new(
+                point(mx(scene.x0) - px(4.), my(scene.y0) - px(4.)),
+                size(px(8.), px(8.)),
+            ),
+            rgb(0xdc2626),
+        ));
+    }
+}
+
 fn prev_char_boundary(s: &str, idx: usize) -> usize {
     let mut i = idx.min(s.len());
     while i > 0 {
@@ -4253,6 +5780,7 @@ pub fn run_gui() {
                         title: Some("Maple Worksheet — [Local Kernel]".into()),
                         ..Default::default()
                     }),
+                    window_decorations: Some(WindowDecorations::Client),
                     focus: true,
                     ..Default::default()
                 },
