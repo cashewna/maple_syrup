@@ -30,6 +30,7 @@ enum Token {
     RParen,
     LBracket,
     RBracket,
+    Pipe,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>> {
@@ -169,6 +170,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             ')' => Token::RParen,
             '[' => Token::LBracket,
             ']' => Token::RBracket,
+            '|' => Token::Pipe,
             other => bail!("unexpected character `{other}`"),
         };
         tokens.push(tok);
@@ -553,6 +555,13 @@ impl Parser {
             Some(Token::LBracket) => {
                 let items = self.parse_comma_list(Token::RBracket)?;
                 Ok(Expr::List(items))
+            }
+            Some(Token::Pipe) => {
+                let inner = self.parse_additive()?;
+                if !matches!(self.next(), Some(Token::Pipe)) {
+                    bail!("expected closing `|`");
+                }
+                Ok(Expr::Call("abs".to_string(), vec![inner]))
             }
             other => bail!("unexpected token `{other:?}` while parsing expression"),
         }

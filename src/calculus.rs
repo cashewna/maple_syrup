@@ -1,6 +1,6 @@
 use crate::ast::{Expr, RelOp};
 use crate::rational::Rational;
-use crate::simplify::{evalf, expand, extract_poly, simplify, subs};
+use crate::simplify::{evalf, expand, extract_poly, normal, simplify, subs};
 use anyhow::{Result, bail};
 
 /// Check whether `expr` contains free occurrences of `var`.
@@ -1141,86 +1141,107 @@ fn solve_and_inequalities(left: &Expr, right: &Expr, var: &str) -> Result<Expr> 
     let Expr::Inequality(op2, l2, r2) = right else {
         bail!("expected inequality, got `{right}`");
     };
-    let b1 = solve_inequality_to_interval(*op1, l1, r1, var)?;
-    let b2 = solve_inequality_to_interval(*op2, l2, r2, var)?;
+    if let (Ok(b1), Ok(b2)) = (
+        solve_inequality_to_interval(*op1, l1, r1, var),
+        solve_inequality_to_interval(*op2, l2, r2, var),
+    ) {
+        let lo = match (b1.lo, b2.lo) {
+            (Some(a), Some(b)) => {
+                if evalf(&a.0)? >= evalf(&b.0)? {
+                    Some(a)
+                } else {
+                    Some(b)
+                }
+            }
+            (a, b) => a.or(b),
+        };
+        let hi = match (b1.hi, b2.hi) {
+            (Some(a), Some(b)) => {
+                if evalf(&a.0)? <= evalf(&b.0)? {
+                    Some(a)
+                } else {
+                    Some(b)
+                }
+            }
+            (a, b) => a.or(b),
+        };
 
-    let lo = match (b1.lo, b2.lo) {
-        (Some(a), Some(b)) => {
-            if evalf(&a.0)? >= evalf(&b.0)? {
-                Some(a)
-            } else {
-                Some(b)
-            }
-        }
-        (a, b) => a.or(b),
-    };
-    let hi = match (b1.hi, b2.hi) {
-        (Some(a), Some(b)) => {
-            if evalf(&a.0)? <= evalf(&b.0)? {
-                Some(a)
-            } else {
-                Some(b)
-            }
-        }
-        (a, b) => a.or(b),
-    };
-
-    match (lo, hi) {
-        (Some((lval, linc)), Some((hval, hinc))) => {
-            let lv = evalf(&lval)?;
-            let hv = evalf(&hval)?;
-            if lv > hv || (lv == hv && (!linc || !hinc)) {
-                return Ok(Expr::List(Vec::new()));
-            }
-            if lv == hv {
-                return Ok(Expr::List(vec![Expr::Equation(
-                    Box::new(Expr::Symbol(var.to_string())),
+        return match (lo, hi) {
+            (Some((lval, linc)), Some((hval, hinc))) => {
+                let lv = evalf(&lval)?;
+                let hv = evalf(&hval)?;
+                if lv > hv || (lv == hv && (!linc || !hinc)) {
+                    return Ok(Expr::List(Vec::new()));
+                }
+                if lv == hv {
+                    return Ok(Expr::List(vec![Expr::Equation(
+                        Box::new(Expr::Symbol(var.to_string())),
+                        Box::new(lval),
+                    )]));
+                }
+                let x = Expr::Symbol(var.to_string());
+                let low_cond = Expr::Inequality(
+                    if linc { RelOp::Le } else { RelOp::Lt },
                     Box::new(lval),
-                )]));
+                    Box::new(x.clone()),
+                );
+                let high_cond = Expr::Inequality(
+                    if hinc { RelOp::Le } else { RelOp::Lt },
+                    Box::new(x),
+                    Box::new(hval),
+                );
+                Ok(Expr::List(vec![Expr::Call(
+                    "And".to_string(),
+                    vec![low_cond, high_cond],
+                )]))
             }
-            let x = Expr::Symbol(var.to_string());
-            let low_cond = Expr::Inequality(
-                if linc { RelOp::Le } else { RelOp::Lt },
+            (Some((lval, linc)), None) => Ok(Expr::List(vec![Expr::Inequality(
+                if linc { RelOp::Ge } else { RelOp::Gt },
+                Box::new(Expr::Symbol(var.to_string())),
                 Box::new(lval),
-                Box::new(x.clone()),
-            );
-            let high_cond = Expr::Inequality(
+            )])),
+            (None, Some((hval, hinc))) => Ok(Expr::List(vec![Expr::Inequality(
                 if hinc { RelOp::Le } else { RelOp::Lt },
-                Box::new(x),
+                Box::new(Expr::Symbol(var.to_string())),
                 Box::new(hval),
-            );
-            Ok(Expr::List(vec![Expr::Call(
-                "And".to_string(),
-                vec![low_cond, high_cond],
-            )]))
-        }
-        (Some((lval, linc)), None) => Ok(Expr::List(vec![Expr::Inequality(
-            if linc { RelOp::Ge } else { RelOp::Gt },
-            Box::new(Expr::Symbol(var.to_string())),
-            Box::new(lval),
-        )])),
-        (None, Some((hval, hinc))) => Ok(Expr::List(vec![Expr::Inequality(
-            if hinc { RelOp::Le } else { RelOp::Lt },
-            Box::new(Expr::Symbol(var.to_string())),
-            Box::new(hval),
-        )])),
-        (None, None) => Ok(Expr::List(Vec::new())),
+            )])),
+            (None, None) => Ok(Expr::List(Vec::new())),
+        };
     }
+
+    if let Some(solved) = solve_rational_sign_chart(
+        &[
+            (*op1, (**l1).clone(), (**r1).clone()),
+            (*op2, (**l2).clone(), (**r2).clone()),
+        ],
+        var,
+    )? {
+        return Ok(solved);
+    }
+
+    bail!("unable to solve compound inequality `{left}` and `{right}` for `{var}`")
 }
 
 fn solve_inequality(op: RelOp, lhs: &Expr, rhs: &Expr, var: &str) -> Result<Expr> {
     if let (Some(a), Some(b)) = (as_abs_arg(lhs), as_abs_arg(rhs)) {
-        let diff_sq = simplify(&Expr::Sub(
-            Box::new(Expr::Pow(
-                Box::new(a.clone()),
-                Box::new(Expr::Rational(Rational::from_int(2))),
-            )),
-            Box::new(Expr::Pow(
-                Box::new(b.clone()),
-                Box::new(Expr::Rational(Rational::from_int(2))),
-            )),
-        ));
-        return solve_inequality(op, &diff_sq, &Expr::Rational(Rational::zero()), var);
+        let a_simp = simplify(&expand(a));
+        let b_simp = simplify(&expand(b));
+        if extract_poly(&a_simp, var).is_some() && extract_poly(&b_simp, var).is_some() {
+            let diff_sq = simplify(&Expr::Sub(
+                Box::new(Expr::Pow(
+                    Box::new(a.clone()),
+                    Box::new(Expr::Rational(Rational::from_int(2))),
+                )),
+                Box::new(Expr::Pow(
+                    Box::new(b.clone()),
+                    Box::new(Expr::Rational(Rational::from_int(2))),
+                )),
+            ));
+            return solve_inequality(op, &diff_sq, &Expr::Rational(Rational::zero()), var);
+        }
+        if let Some(solved) = solve_rational_sign_chart(&[(op, lhs.clone(), rhs.clone())], var)? {
+            return Ok(solved);
+        }
     }
 
     if let Some(inner) = as_abs_arg(lhs) {
@@ -1248,7 +1269,19 @@ fn solve_inequality(op: RelOp, lhs: &Expr, rhs: &Expr, var: &str) -> Result<Expr
                 if left_sol.len() == 1 && right_sol.len() == 1 {
                     let a = left_sol.pop().unwrap();
                     let b = right_sol.pop().unwrap();
-                    return Ok(Expr::List(vec![Expr::Call("Or".to_string(), vec![a, b])]));
+                    if matches!(&a, Expr::Inequality(..)) && matches!(&b, Expr::Inequality(..)) {
+                        return Ok(Expr::List(vec![Expr::Call("Or".to_string(), vec![a, b])]));
+                    }
+                    let mut branches = Vec::new();
+                    for item in [a, b] {
+                        match item {
+                            Expr::Call(ref n, ref args) if n == "Or" => {
+                                branches.extend(args.clone())
+                            }
+                            other => branches.push(other),
+                        }
+                    }
+                    return Ok(Expr::List(vec![Expr::Call("Or".to_string(), branches)]));
                 }
                 left_sol.extend(right_sol);
                 Ok(Expr::List(left_sol))
@@ -1329,10 +1362,335 @@ fn solve_inequality(op: RelOp, lhs: &Expr, rhs: &Expr, var: &str) -> Result<Expr
         }
     }
 
+    if let Some(solved) = solve_rational_sign_chart(&[(op, lhs.clone(), rhs.clone())], var)? {
+        return Ok(solved);
+    }
+
     bail!(
         "unable to symbolically solve inequality `{lhs} {} {rhs}` for `{var}`",
         op.ascii()
     )
+}
+
+#[derive(Clone, Debug)]
+struct CritPoint {
+    val: f64,
+    expr: Expr,
+    is_pole: bool,
+}
+
+fn collect_rational_roots(expr: &Expr, var: &str, is_pole: bool, out: &mut Vec<CritPoint>) {
+    let norm = normal(expr);
+    let (num, den) = match norm {
+        Expr::Div(n, d) => (expand(&n), expand(&d)),
+        other => (expand(&other), Expr::Rational(Rational::one())),
+    };
+    if let Some(poly) = extract_poly(&den, var)
+        && poly.len() > 1
+        && let Ok(roots) = solve_polynomial(&poly)
+    {
+        for r in roots {
+            if let Ok(v) = evalf(&r)
+                && v.is_finite()
+            {
+                out.push(CritPoint {
+                    val: v,
+                    expr: r,
+                    is_pole: true,
+                });
+            }
+        }
+    }
+    if let Some(poly) = extract_poly(&num, var)
+        && poly.len() > 1
+        && let Ok(roots) = solve_polynomial(&poly)
+    {
+        for r in roots {
+            if let Ok(v) = evalf(&r)
+                && v.is_finite()
+            {
+                out.push(CritPoint {
+                    val: v,
+                    expr: r,
+                    is_pole,
+                });
+            }
+        }
+    }
+}
+
+fn gather_ineq_critical_points(expr_a: &Expr, expr_b: &Expr, var: &str, out: &mut Vec<CritPoint>) {
+    match (as_abs_arg(expr_a), as_abs_arg(expr_b)) {
+        (Some(a), Some(b)) => {
+            collect_rational_roots(
+                &Expr::Sub(Box::new(a.clone()), Box::new(b.clone())),
+                var,
+                false,
+                out,
+            );
+            collect_rational_roots(
+                &Expr::Add(Box::new(a.clone()), Box::new(b.clone())),
+                var,
+                false,
+                out,
+            );
+        }
+        (Some(a), None) => {
+            collect_rational_roots(
+                &Expr::Sub(Box::new(a.clone()), Box::new(expr_b.clone())),
+                var,
+                false,
+                out,
+            );
+            collect_rational_roots(
+                &Expr::Add(Box::new(a.clone()), Box::new(expr_b.clone())),
+                var,
+                false,
+                out,
+            );
+        }
+        (None, Some(b)) => {
+            collect_rational_roots(
+                &Expr::Sub(Box::new(expr_a.clone()), Box::new(b.clone())),
+                var,
+                false,
+                out,
+            );
+            collect_rational_roots(
+                &Expr::Add(Box::new(expr_a.clone()), Box::new(b.clone())),
+                var,
+                false,
+                out,
+            );
+        }
+        (None, None) => {
+            collect_rational_roots(
+                &Expr::Sub(Box::new(expr_a.clone()), Box::new(expr_b.clone())),
+                var,
+                false,
+                out,
+            );
+        }
+    }
+}
+
+fn eval_rational_at(expr: &Expr, var: &str, val: Rational) -> Option<Rational> {
+    match expr {
+        Expr::Rational(r) => Some(*r),
+        Expr::Symbol(s) if s == var => Some(val),
+        Expr::UnaryNeg(a) => Some(-eval_rational_at(a, var, val)?),
+        Expr::Add(a, b) => Some(eval_rational_at(a, var, val)? + eval_rational_at(b, var, val)?),
+        Expr::Sub(a, b) => Some(eval_rational_at(a, var, val)? - eval_rational_at(b, var, val)?),
+        Expr::Mul(a, b) => Some(eval_rational_at(a, var, val)? * eval_rational_at(b, var, val)?),
+        Expr::Div(a, b) => {
+            let bv = eval_rational_at(b, var, val)?;
+            if bv.is_zero() {
+                None
+            } else {
+                Some(eval_rational_at(a, var, val)? / bv)
+            }
+        }
+        Expr::Pow(base, exp) => {
+            let b = eval_rational_at(base, var, val)?;
+            let Expr::Rational(er) = exp.as_ref() else {
+                return None;
+            };
+            if !er.is_integer() || er.num.abs() > 16 {
+                return None;
+            }
+            if b.is_zero() && er.is_negative() {
+                None
+            } else {
+                b.pow(er.num as i32).ok()
+            }
+        }
+        Expr::Call(name, args) if name == "abs" && args.len() == 1 => {
+            Some(eval_rational_at(&args[0], var, val)?.abs())
+        }
+        _ => None,
+    }
+}
+
+fn eval_expr_at(expr: &Expr, var: &str, pt: &Expr) -> Option<f64> {
+    if let Expr::Rational(r) = pt
+        && let Some(rv) = eval_rational_at(expr, var, *r)
+    {
+        return Some(rv.to_f64());
+    }
+    let val = evalf(pt).ok()?;
+    let mut subbed = subs(var, &Expr::Float(val), expr);
+    if let Expr::Call(n, args) = &subbed
+        && n == "abs"
+        && args.len() == 1
+    {
+        return evalf(&args[0]).ok().map(f64::abs);
+    }
+    if let Expr::Div(_, d) = &subbed
+        && let Ok(dv) = evalf(d)
+        && dv.abs() < 1e-12
+    {
+        return None;
+    }
+    subbed = simplify(&subbed);
+    let fv = evalf(&subbed).ok()?;
+    if fv.is_finite() { Some(fv) } else { None }
+}
+
+fn check_single_ineq_at(op: RelOp, lhs: &Expr, rhs: &Expr, var: &str, pt: &Expr) -> bool {
+    if let Expr::Rational(r) = pt
+        && let (Some(lv), Some(rv)) = (
+            eval_rational_at(lhs, var, *r),
+            eval_rational_at(rhs, var, *r),
+        )
+    {
+        return match op {
+            RelOp::Lt => lv < rv,
+            RelOp::Le => lv <= rv,
+            RelOp::Gt => lv > rv,
+            RelOp::Ge => lv >= rv,
+        };
+    }
+    let (Some(lv), Some(rv)) = (eval_expr_at(lhs, var, pt), eval_expr_at(rhs, var, pt)) else {
+        return false;
+    };
+    match op {
+        RelOp::Lt => lv < rv - 1e-12,
+        RelOp::Le => lv <= rv + 1e-12,
+        RelOp::Gt => lv > rv + 1e-12,
+        RelOp::Ge => lv >= rv - 1e-12,
+    }
+}
+
+fn solve_rational_sign_chart(conds: &[(RelOp, Expr, Expr)], var: &str) -> Result<Option<Expr>> {
+    let mut raw_pts = Vec::new();
+    for (_, lhs, rhs) in conds {
+        gather_ineq_critical_points(lhs, rhs, var, &mut raw_pts);
+    }
+    if raw_pts.is_empty() {
+        return Ok(None);
+    }
+    raw_pts.sort_by(|a, b| a.val.total_cmp(&b.val));
+
+    let mut pts: Vec<CritPoint> = Vec::new();
+    for cp in raw_pts {
+        if let Some(last) = pts.last_mut()
+            && (cp.val - last.val).abs() < 1e-10
+        {
+            last.is_pole |= cp.is_pole;
+        } else {
+            pts.push(cp);
+        }
+    }
+
+    let holds_all = |pt: &Expr| -> bool {
+        conds
+            .iter()
+            .all(|(op, lhs, rhs)| check_single_ineq_at(*op, lhs, rhs, var, pt))
+    };
+
+    let n = pts.len();
+    let mut open_holds = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let probe = if i == 0 {
+            match &pts[0].expr {
+                Expr::Rational(r) => Expr::Rational(*r - Rational::one()),
+                _ => Expr::Float(pts[0].val - 1.0),
+            }
+        } else if i == n {
+            match &pts[n - 1].expr {
+                Expr::Rational(r) => Expr::Rational(*r + Rational::one()),
+                _ => Expr::Float(pts[n - 1].val + 1.0),
+            }
+        } else {
+            match (&pts[i - 1].expr, &pts[i].expr) {
+                (Expr::Rational(a), Expr::Rational(b)) => {
+                    Expr::Rational((*a + *b) / Rational::from_int(2))
+                }
+                _ => Expr::Float(0.5 * (pts[i - 1].val + pts[i].val)),
+            }
+        };
+        open_holds.push(holds_all(&probe));
+    }
+
+    let pt_holds: Vec<bool> = pts
+        .iter()
+        .map(|cp| !cp.is_pole && holds_all(&cp.expr))
+        .collect();
+
+    // Build contiguous merged intervals `(lo_idx_opt, lo_inc, hi_idx_opt, hi_inc)` plus isolated points.
+    let mut pieces: Vec<Expr> = Vec::new();
+    let x_sym = Expr::Symbol(var.to_string());
+    let mut idx = 0usize;
+    while idx <= n {
+        if open_holds[idx] {
+            let start_open = idx;
+            let mut end_open = idx;
+            while end_open < n && pt_holds[end_open] && open_holds[end_open + 1] {
+                end_open += 1;
+            }
+            let lo = if start_open > 0 {
+                Some((pts[start_open - 1].expr.clone(), pt_holds[start_open - 1]))
+            } else {
+                None
+            };
+            let hi = if end_open < n {
+                Some((pts[end_open].expr.clone(), pt_holds[end_open]))
+            } else {
+                None
+            };
+            match (lo, hi) {
+                (None, Some((h, h_inc))) => {
+                    pieces.push(Expr::Inequality(
+                        if h_inc { RelOp::Le } else { RelOp::Lt },
+                        Box::new(x_sym.clone()),
+                        Box::new(h),
+                    ));
+                }
+                (Some((l, l_inc)), None) => {
+                    pieces.push(Expr::Inequality(
+                        if l_inc { RelOp::Ge } else { RelOp::Gt },
+                        Box::new(x_sym.clone()),
+                        Box::new(l),
+                    ));
+                }
+                (Some((l, l_inc)), Some((h, h_inc))) => {
+                    pieces.push(Expr::Call(
+                        "And".to_string(),
+                        vec![
+                            Expr::Inequality(
+                                if l_inc { RelOp::Le } else { RelOp::Lt },
+                                Box::new(l),
+                                Box::new(x_sym.clone()),
+                            ),
+                            Expr::Inequality(
+                                if h_inc { RelOp::Le } else { RelOp::Lt },
+                                Box::new(x_sym.clone()),
+                                Box::new(h),
+                            ),
+                        ],
+                    ));
+                }
+                (None, None) => pieces.push(x_sym.clone()),
+            }
+            idx = end_open + 1;
+        } else {
+            if idx < n && pt_holds[idx] && (idx == 0 || !open_holds[idx]) && !open_holds[idx + 1] {
+                pieces.push(Expr::Equation(
+                    Box::new(x_sym.clone()),
+                    Box::new(pts[idx].expr.clone()),
+                ));
+            }
+            idx += 1;
+        }
+    }
+
+    if pieces.is_empty() {
+        Ok(Some(Expr::List(Vec::new())))
+    } else if pieces.len() == 1 {
+        Ok(Some(Expr::List(pieces)))
+    } else {
+        Ok(Some(Expr::List(vec![Expr::Call("Or".to_string(), pieces)])))
+    }
 }
 
 fn replace_ode_terms(expr: &Expr, y_name: &str, indep: &mut Option<String>) -> Expr {

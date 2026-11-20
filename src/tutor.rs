@@ -170,43 +170,43 @@ const PRECALC_CH1_PROBLEMS: [StudyGuideProblem; 10] = [
     StudyGuideProblem {
         number: 2,
         prompt_text: "|2*x - 3| < 5",
-        maple_cmd: "solve(abs(2*x - 3) < 5, x);",
+        maple_cmd: "solve(|2*x - 3| < 5, x);",
         hint: "Rewrite |A| < 5 as the compound inequality -5 < A < 5.",
     },
     StudyGuideProblem {
         number: 3,
         prompt_text: "|2*x - 3| < |5*x - 4|",
-        maple_cmd: "solve(abs(2*x - 3) < abs(5*x - 4), x);",
+        maple_cmd: "solve(|2*x - 3| < |5*x - 4|, x);",
         hint: "Square both nonnegative sides and solve the resulting quadratic inequality.",
     },
     StudyGuideProblem {
         number: 4,
         prompt_text: "5 <= |6*x - 1|",
-        maple_cmd: "solve(5 <= abs(6*x - 1), x);",
+        maple_cmd: "solve(5 <= |6*x - 1|, x);",
         hint: "Split |6x - 1| >= 5 into two outer half-lines: 6x - 1 <= -5 or 6x - 1 >= 5.",
     },
     StudyGuideProblem {
         number: 5,
         prompt_text: "2/x - 1 <= 7",
-        maple_cmd: "solve(2 - 8*x <= 0, x);",
+        maple_cmd: "solve(2/x - 1 <= 7, x);",
         hint: "Watch the sign flip when x < 0 vs x > 0.",
     },
     StudyGuideProblem {
         number: 6,
         prompt_text: "|2/x - 1| <= 7",
-        maple_cmd: "solve(abs(2 - x) <= 7*abs(x), x);",
+        maple_cmd: "solve(|2/x - 1| <= 7, x);",
         hint: "Multiply by |x| > 0 (x != 0) or test regions around poles.",
     },
     StudyGuideProblem {
         number: 7,
         prompt_text: "|2/x - 1| < |5*x + 8|",
-        maple_cmd: "solve(x^2 - 5*x + 6 <= 0, x);",
+        maple_cmd: "solve(|2/x - 1| < |5*x + 8|, x);",
         hint: "Compare critical points where numerator or denominator changes sign.",
     },
     StudyGuideProblem {
         number: 8,
         prompt_text: "5 <= |2/x - 1|",
-        maple_cmd: "solve(x^2 - 4 > 0, x);",
+        maple_cmd: "solve(5 <= |2/x - 1|, x);",
         hint: "Equivalent to 2/x - 1 <= -5 or 2/x - 1 >= 5.",
     },
     StudyGuideProblem {
@@ -218,7 +218,7 @@ const PRECALC_CH1_PROBLEMS: [StudyGuideProblem; 10] = [
     StudyGuideProblem {
         number: 10,
         prompt_text: "3 < |2/x - 1| < 7",
-        maple_cmd: "solve(abs(x - 1) < 3, x);",
+        maple_cmd: "solve(3 < |2/x - 1| < 7, x);",
         hint: "Intersect 3 < |2/x - 1| with |2/x - 1| < 7 (excluding x = 0).",
     },
 ];

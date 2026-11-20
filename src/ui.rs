@@ -1,4 +1,5 @@
-use crate::ast::{Expr, to_latex};
+use crate::ast::{Expr, Statement, to_latex};
+use crate::parser::{parse_expr, parse_statements};
 use crate::plot::{Plot3dData, PlotData};
 use crate::tutor::{de_presets, help_articles, simulate_de_scene, study_guide_chapters};
 use crate::worksheet::{CellOutput, MatrixPresetKind, MatrixTemplate, Worksheet, WorksheetCell};
@@ -1260,6 +1261,7 @@ impl MapleWorkspaceView {
             .gap_2()
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1383,6 +1385,7 @@ impl MapleWorkspaceView {
                     .flex_1()
                     .h_full()
                     .min_w(px(64.))
+                    .overflow_hidden()
                     .px_3()
                     .window_control_area(WindowControlArea::Drag)
                     .cursor(CursorStyle::OpenHand)
@@ -1398,6 +1401,11 @@ impl MapleWorkspaceView {
                     })
                     .child(
                         div()
+                            .min_w_0()
+                            .max_w_full()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x334155))
@@ -1406,6 +1414,7 @@ impl MapleWorkspaceView {
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -2398,6 +2407,7 @@ impl MapleWorkspaceView {
             .when(self.palettes.favorites, |el| {
                 el.child(div().px_1().pb_1().flex().flex_col().gap_1().children(
                     fav_items.into_iter().enumerate().map(|(i, cmd)| {
+                        let preview = try_render_2d_statement_or_expr(cmd, 0.72, rgb(0x1d4ed8));
                         div()
                             .id(("fav-tmpl", i))
                             .px_2()
@@ -2408,12 +2418,36 @@ impl MapleWorkspaceView {
                             .border_color(rgb(0xdbe3ed))
                             .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
                             .cursor_pointer()
-                            .text_xs()
-                            .text_color(rgb(0x1e293b))
+                            .tooltip(make_tooltip(format!("Insert template: {cmd}")))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_input_and_focus(cmd, window, cx);
                             }))
-                            .child(cmd)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(match preview {
+                                        Some(node) => node,
+                                        None => div()
+                                            .text_xs()
+                                            .text_color(rgb(0x1e293b))
+                                            .child(cmd)
+                                            .into_any_element(),
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(rgb(0x94a3b8))
+                                    .child(cmd.trim_end_matches(';')),
+                            )
                     }),
                 ))
             })
@@ -2437,9 +2471,16 @@ impl MapleWorkspaceView {
                         .flex_wrap()
                         .gap_1()
                         .children(expr_items.into_iter().enumerate().map(|(i, (lbl, tmpl))| {
+                            let is_math_shape = i < 6;
+                            let preview = if is_math_shape {
+                                try_render_2d_statement_or_expr(tmpl, 0.72, rgb(0x0f172a))
+                            } else {
+                                None
+                            };
                             div()
                                 .id(("expr-tmpl", i))
                                 .w(px(116.))
+                                .min_h(px(28.))
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
@@ -2448,13 +2489,22 @@ impl MapleWorkspaceView {
                                 .border_color(rgb(0xdbe3ed))
                                 .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
                                 .cursor_pointer()
-                                .text_xs()
-                                .text_color(rgb(0x0f172a))
+                                .tooltip(make_tooltip(format!("Insert `{tmpl}`")))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.insert_text(tmpl, cx);
                                     window.focus(&this.focus_handle);
                                 }))
-                                .child(lbl)
+                                .child(match preview {
+                                    Some(node) => node,
+                                    None => div()
+                                        .text_xs()
+                                        .text_color(rgb(0x0f172a))
+                                        .child(lbl)
+                                        .into_any_element(),
+                                })
                         })),
                 )
             })
@@ -2471,6 +2521,7 @@ impl MapleWorkspaceView {
             .when(self.palettes.calculus, |el| {
                 el.child(div().px_1().pb_1().flex().flex_col().gap_1().children(
                     calc_items.into_iter().enumerate().map(|(i, cmd)| {
+                        let preview = try_render_2d_statement_or_expr(cmd, 0.72, rgb(0x1d4ed8));
                         div()
                             .id(("calc-tmpl", i))
                             .px_2()
@@ -2481,12 +2532,15 @@ impl MapleWorkspaceView {
                             .border_color(rgb(0xdbe3ed))
                             .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
                             .cursor_pointer()
-                            .text_xs()
-                            .text_color(rgb(0x1e293b))
+                            .tooltip(make_tooltip(format!("Load `{cmd}` into prompt")))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_input_and_focus(cmd, window, cx);
                             }))
-                            .child(cmd)
+                            .when_some(preview, |el, node| el.child(node))
+                            .child(div().text_xs().text_color(rgb(0x64748b)).child(cmd))
                     }),
                 ))
             })
@@ -2743,13 +2797,15 @@ impl MapleWorkspaceView {
                                 .border_color(rgb(0xdbe3ed))
                                 .hover(|s| s.bg(rgb(0xeff6ff)))
                                 .cursor_pointer()
+                                .tooltip(make_tooltip(format!("Insert symbol `{sym}`")))
                                 .text_xs()
-                                .text_color(rgb(0x1e293b))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x1d4ed8))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.insert_text(sym, cx);
                                     window.focus(&this.focus_handle);
                                 }))
-                                .child(sym)
+                                .child(map_math_symbol(sym))
                         })),
                 )
             })
@@ -2984,6 +3040,7 @@ impl MapleWorkspaceView {
                     .w_full()
                     .h(px(32.))
                     .px_2()
+                    .overflow_hidden()
                     .bg(rgb(0xe4ebf2))
                     .border_b_1()
                     .border_color(rgb(0xd4dde7))
@@ -2996,6 +3053,7 @@ impl MapleWorkspaceView {
                         let closable = idx > 0;
                         div()
                             .h(px(28.))
+                            .min_w_0()
                             .rounded_t_md()
                             .bg(if active { rgb(0xffffff) } else { rgb(0xdbe3ec) })
                             .border_t_1()
@@ -3010,6 +3068,7 @@ impl MapleWorkspaceView {
                                     .id(("doc-tab-select", tab.id))
                                     .px_2p5()
                                     .h_full()
+                                    .min_w_0()
                                     .cursor_pointer()
                                     .tooltip(make_tooltip(format!("Switch to {}", tab.title)))
                                     .flex()
@@ -3023,6 +3082,10 @@ impl MapleWorkspaceView {
                                     }))
                                     .child(
                                         div()
+                                            .max_w(px(210.))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .text_xs()
                                             .font_weight(if active {
                                                 FontWeight::SEMIBOLD
@@ -3420,41 +3483,94 @@ impl MapleWorkspaceView {
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .text_size(px(14.0 * zoom))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0x991b1b))
-                                            .when_some(tab.editing_cell, |el, edit_i| {
-                                                el.child(
-                                                    div()
-                                                        .mr_2()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(rgb(0xfef3c7))
-                                                        .text_xs()
-                                                        .text_color(rgb(0x92400e))
-                                                        .child(format!("Editing ({})", edit_i + 1)),
-                                                )
-                                            })
-                                            .child(before)
-                                            .child(div().w(px(2.)).h(px(17. * zoom)).bg(rgb(0x991b1b)))
-                                            .child(if is_empty {
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
                                                 div()
-                                                    .pl_2()
-                                                    .font_weight(FontWeight::NORMAL)
-                                                    .text_color(rgb(0x94a3b8))
-                                                    .child("Enter Maple expression...")
-                                                    .into_any_element()
-                                            } else {
-                                                div().child(after).into_any_element()
-                                            }),
+                                                    .flex()
+                                                    .flex_row()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .text_size(px(14.0 * zoom))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(0x991b1b))
+                                                    .when_some(tab.editing_cell, |el, edit_i| {
+                                                        el.child(
+                                                            div()
+                                                                .mr_2()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(rgb(0xfef3c7))
+                                                                .text_xs()
+                                                                .text_color(rgb(0x92400e))
+                                                                .child(format!(
+                                                                    "Editing ({})",
+                                                                    edit_i + 1
+                                                                )),
+                                                        )
+                                                    })
+                                                    .child(before)
+                                                    .child(
+                                                        div()
+                                                            .w(px(2.))
+                                                            .h(px(17. * zoom))
+                                                            .bg(rgb(0x991b1b)),
+                                                    )
+                                                    .child(if is_empty {
+                                                        div()
+                                                            .pl_2()
+                                                            .font_weight(FontWeight::NORMAL)
+                                                            .text_color(rgb(0x94a3b8))
+                                                            .child("Enter Maple expression...")
+                                                            .into_any_element()
+                                                    } else {
+                                                        div().child(after).into_any_element()
+                                                    }),
+                                            )
+                                            .when(
+                                                self.entry_mode == EntryMode::Math
+                                                    && !tab.input.trim().is_empty(),
+                                                |el| {
+                                                    let parsed = try_render_2d_statement_or_expr(
+                                                        &tab.input,
+                                                        zoom * 0.85,
+                                                        rgb(0x1e293b),
+                                                    );
+                                                    el.when_some(parsed, |row, node| {
+                                                        row.child(
+                                                            div()
+                                                                .px_2()
+                                                                .py_1()
+                                                                .rounded_sm()
+                                                                .bg(rgb(0xf8fafc))
+                                                                .border_1()
+                                                                .border_color(rgb(0xe2e8f0))
+                                                                .flex()
+                                                                .flex_row()
+                                                                .flex_wrap()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(0x64748b))
+                                                                        .child("2D Math:"),
+                                                                )
+                                                                .child(node),
+                                                        )
+                                                    })
+                                                },
+                                            ),
                                     )
                                     .child(
                                         div()
                                             .id("inline-eval-btn")
+                                            .flex_none()
+                                            .whitespace_nowrap()
                                             .px_2p5()
                                             .py_1()
                                             .rounded_sm()
@@ -3492,6 +3608,11 @@ impl MapleWorkspaceView {
             .result_expr
             .as_ref()
             .map(|e| to_latex(e, cell.assigned_name.as_deref()));
+        let math_input_node = if self.entry_mode == EntryMode::Math {
+            try_render_2d_statement_or_expr(&cell.input, zoom * 0.88, rgb(0x991b1b))
+        } else {
+            None
+        };
         let bracket_color = if is_selected {
             rgb(0x2563eb)
         } else {
@@ -3544,6 +3665,7 @@ impl MapleWorkspaceView {
                     // Crimson `[>` input line
                     .child(
                         div()
+                            .w_full()
                             .flex()
                             .flex_row()
                             .items_center()
@@ -3551,27 +3673,54 @@ impl MapleWorkspaceView {
                             .gap_2()
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .flex()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_2()
                                     .child(
                                         div()
+                                            .flex_none()
                                             .text_size(px(14.0 * zoom))
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(rgb(0x991b1b))
                                             .child("[>"),
                                     )
-                                    .child(
-                                        div()
+                                    .child(match math_input_node {
+                                        Some(node) => div()
+                                            .flex()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(node)
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(rgb(0xf8fafc))
+                                                    .border_1()
+                                                    .border_color(rgb(0xe2e8f0))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child(cell.input.clone()),
+                                            )
+                                            .into_any_element(),
+                                        None => div()
                                             .text_size(px(14.0 * zoom))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(0x991b1b))
-                                            .child(cell.input.clone()),
-                                    ),
+                                            .child(cell.input.clone())
+                                            .into_any_element(),
+                                    }),
                             )
                             .child(
                                 div()
+                                    .flex_none()
                                     .flex()
                                     .flex_row()
                                     .items_center()
@@ -4219,6 +4368,8 @@ fn cell_pill(
         .hover(|s| s.bg(rgb(0xeff6ff)).border_color(rgb(0x93c5fd)))
         .cursor_pointer()
         .tooltip(make_tooltip(tip))
+        .flex_none()
+        .whitespace_nowrap()
         .text_xs()
         .text_color(rgb(0x475569))
         .on_click(on_click)
@@ -4449,6 +4600,7 @@ impl MapleWorkspaceView {
             .gap_2()
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -4456,6 +4608,9 @@ impl MapleWorkspaceView {
                     .gap_2()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x334155))
@@ -4463,6 +4618,7 @@ impl MapleWorkspaceView {
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .flex_row()
                             .items_center()
@@ -4587,6 +4743,7 @@ impl MapleWorkspaceView {
             .gap_2()
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -4594,6 +4751,9 @@ impl MapleWorkspaceView {
                     .gap_2()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x334155))
@@ -4604,6 +4764,7 @@ impl MapleWorkspaceView {
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .flex_row()
                             .items_center()
@@ -4947,50 +5108,120 @@ impl MapleWorkspaceView {
                             )
                             .children(chapter.problems.iter().enumerate().map(|(pi, prob)| {
                                 let cmd = prob.maple_cmd;
+                                let math_title = try_render_2d_statement_or_expr(
+                                    prob.prompt_text,
+                                    0.96,
+                                    rgb(0x0f172a),
+                                );
+                                let fallback_cmd_math = if math_title.is_none() {
+                                    try_render_2d_statement_or_expr(
+                                        prob.maple_cmd,
+                                        0.86,
+                                        rgb(0x1d4ed8),
+                                    )
+                                } else {
+                                    None
+                                };
                                 div()
-                                    .p_2p5()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .p_3()
                                     .rounded_md()
                                     .bg(rgb(0xf8fafc))
                                     .border_1()
                                     .border_color(rgb(0xe2e8f0))
                                     .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
+                                    .flex_col()
+                                    .gap_2()
                                     .child(
                                         div()
+                                            .w_full()
                                             .flex()
-                                            .flex_col()
-                                            .gap_0p5()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_3()
                                             .child(
                                                 div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(0x0f172a))
-                                                    .child(format!(
-                                                        "{}.   {}",
-                                                        prob.number, prob.prompt_text
-                                                    )),
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .gap_2p5()
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(rgb(0x0f172a))
+                                                            .child(format!("{}.", prob.number)),
+                                                    )
+                                                    .child(match math_title {
+                                                        Some(node) => node,
+                                                        None => div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .flex_wrap()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(rgb(0x0f172a))
+                                                                    .child(prob.prompt_text),
+                                                            )
+                                                            .when_some(
+                                                                fallback_cmd_math,
+                                                                |el, m| el.child(m),
+                                                            )
+                                                            .into_any_element(),
+                                                    }),
+                                            )
+                                            .child(div().flex_none().child(cell_pill(
+                                                ("sg-run", pi),
+                                                "Solve in Worksheet",
+                                                cx.listener(move |this, _, window, cx| {
+                                                    this.open_new_worksheet_tab(None);
+                                                    this.run_statement_in_active_tab(cmd, true, cx);
+                                                    window.focus(&this.focus_handle);
+                                                }),
+                                            ))),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .pt_1p5()
+                                            .border_t_1()
+                                            .border_color(rgb(0xe2e8f0))
+                                            .flex()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child(format!("Hint: {}", prob.hint)),
                                             )
                                             .child(
-                                                div().text_xs().text_color(rgb(0x64748b)).child(
-                                                    format!(
-                                                        "Hint: {}   Command: {}",
-                                                        prob.hint, prob.maple_cmd
-                                                    ),
-                                                ),
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(rgb(0xf1f5f9))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x991b1b))
+                                                    .child(format!("[> {}", prob.maple_cmd)),
                                             ),
                                     )
-                                    .child(cell_pill(
-                                        ("sg-run", pi),
-                                        "Solve in Worksheet",
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.open_new_worksheet_tab(None);
-                                            this.run_statement_in_active_tab(cmd, true, cx);
-                                            window.focus(&this.focus_handle);
-                                        }),
-                                    ))
                             })),
                     ),
             )
@@ -5119,14 +5350,35 @@ impl MapleWorkspaceView {
                                             .flex_row()
                                             .items_center()
                                             .justify_between()
+                                            .gap_3()
                                             .child(
                                                 div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(0x991b1b))
-                                                    .child(format!("[> {}", active.example_cmd)),
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .when_some(
+                                                        try_render_2d_statement_or_expr(
+                                                            active.example_cmd,
+                                                            0.92,
+                                                            rgb(0x1d4ed8),
+                                                        ),
+                                                        |el, node| el.child(node),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(rgb(0x991b1b))
+                                                            .child(format!(
+                                                                "[> {}",
+                                                                active.example_cmd
+                                                            )),
+                                                    ),
                                             )
-                                            .child(cell_pill(
+                                            .child(div().flex_none().child(cell_pill(
                                                 ("hlp-try", article_idx),
                                                 "Run Example",
                                                 cx.listener(move |this, _, window, cx| {
@@ -5136,7 +5388,7 @@ impl MapleWorkspaceView {
                                                     );
                                                     window.focus(&this.focus_handle);
                                                 }),
-                                            )),
+                                            ))),
                                     ),
                             ),
                     ),
@@ -5144,13 +5396,21 @@ impl MapleWorkspaceView {
     }
 }
 
-fn math_span(text: impl Into<gpui::SharedString>, zoom: f32) -> gpui::AnyElement {
+fn math_span_colored(
+    text: impl Into<gpui::SharedString>,
+    zoom: f32,
+    color: Rgba,
+) -> gpui::AnyElement {
     div()
         .text_size(px(16.0 * zoom))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(0x1d4ed8))
+        .text_color(color)
         .child(text.into())
         .into_any_element()
+}
+
+fn math_span(text: impl Into<gpui::SharedString>, zoom: f32) -> gpui::AnyElement {
+    math_span_colored(text, zoom, rgb(0x1d4ed8))
 }
 
 fn map_math_symbol(sym: &str) -> &str {
@@ -5168,18 +5428,22 @@ fn map_math_symbol(sym: &str) -> &str {
     }
 }
 
-fn wrap_parens(inner: gpui::AnyElement, zoom: f32) -> gpui::AnyElement {
+fn wrap_parens_colored(inner: gpui::AnyElement, zoom: f32, color: Rgba) -> gpui::AnyElement {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .child(math_span("(", zoom))
+        .child(math_span_colored("(", zoom, color))
         .child(inner)
-        .child(math_span(")", zoom))
+        .child(math_span_colored(")", zoom, color))
         .into_any_element()
 }
 
-fn render_stacked_fraction(num: gpui::AnyElement, den: gpui::AnyElement) -> gpui::AnyElement {
+fn render_stacked_fraction_colored(
+    num: gpui::AnyElement,
+    den: gpui::AnyElement,
+    color: Rgba,
+) -> gpui::AnyElement {
     div()
         .px_1()
         .flex()
@@ -5187,40 +5451,106 @@ fn render_stacked_fraction(num: gpui::AnyElement, den: gpui::AnyElement) -> gpui
         .items_center()
         .gap_0p5()
         .child(num)
-        .child(div().w_full().min_w(px(14.)).h(px(1.5)).bg(rgb(0x1d4ed8)))
+        .child(div().w_full().min_w(px(14.)).h(px(1.5)).bg(color))
         .child(den)
         .into_any_element()
 }
 
+fn try_render_2d_statement_or_expr(
+    input: &str,
+    zoom: f32,
+    color: Rgba,
+) -> Option<gpui::AnyElement> {
+    let trimmed = input
+        .trim()
+        .trim_end_matches(';')
+        .trim_end_matches(':')
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(expr) = parse_expr(trimmed) {
+        return Some(render_2d_math_node_colored(&expr, 0, false, zoom, color));
+    }
+    let stmts = parse_statements(input.trim()).ok()?;
+    if stmts.len() != 1 {
+        return None;
+    }
+    match &stmts[0] {
+        Statement::Assignment { name, value, .. } => Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .child(math_span_colored(format!("{name} :="), zoom, color))
+                .child(render_2d_math_node_colored(value, 0, false, zoom, color))
+                .into_any_element(),
+        ),
+        Statement::FunctionDef {
+            name, params, body, ..
+        } => Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .child(math_span_colored(
+                    format!("{name} := ({}) →", params.join(", ")),
+                    zoom,
+                    color,
+                ))
+                .child(render_2d_math_node_colored(body, 0, false, zoom, color))
+                .into_any_element(),
+        ),
+        Statement::EvalExpr { expr, .. } => {
+            Some(render_2d_math_node_colored(expr, 0, false, zoom, color))
+        }
+        Statement::Restart { .. } => None,
+    }
+}
+
 fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) -> gpui::AnyElement {
+    render_2d_math_node_colored(expr, parent_prec, is_rhs, zoom, rgb(0x1d4ed8))
+}
+
+fn render_2d_math_node_colored(
+    expr: &Expr,
+    parent_prec: u8,
+    is_rhs: bool,
+    zoom: f32,
+    color: Rgba,
+) -> gpui::AnyElement {
     match expr {
         Expr::Rational(r) => {
             if r.is_integer() {
                 let s = r.num.to_string();
-                let node = math_span(s, zoom);
+                let node = math_span_colored(s, zoom, color);
                 if r.is_negative() && parent_prec >= 5 && !is_rhs {
-                    wrap_parens(node, zoom)
+                    wrap_parens_colored(node, zoom, color)
                 } else {
                     node
                 }
             } else {
-                let num_node = math_span(r.num.abs().to_string(), zoom * 0.88);
-                let den_node = math_span(r.den.to_string(), zoom * 0.88);
-                let frac = render_stacked_fraction(num_node, den_node);
+                let num_node = math_span_colored(r.num.abs().to_string(), zoom * 0.88, color);
+                let den_node = math_span_colored(r.den.to_string(), zoom * 0.88, color);
+                let frac = render_stacked_fraction_colored(num_node, den_node, color);
                 let signed = if r.is_negative() {
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_0p5()
-                        .child(math_span("−", zoom))
+                        .child(math_span_colored("−", zoom, color))
                         .child(frac)
                         .into_any_element()
                 } else {
                     frac
                 };
                 if parent_prec >= 5 {
-                    wrap_parens(signed, zoom)
+                    wrap_parens_colored(signed, zoom, color)
                 } else {
                     signed
                 }
@@ -5228,24 +5558,42 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
         }
         Expr::Float(v) => {
             let clean = if *v == 0.0 { 0.0 } else { *v };
-            let node = math_span(format!("{clean}"), zoom);
+            let node = math_span_colored(format!("{clean}"), zoom, color);
             if *v < 0.0 && parent_prec >= 5 && !is_rhs {
-                wrap_parens(node, zoom)
+                wrap_parens_colored(node, zoom, color)
             } else {
                 node
             }
         }
-        Expr::Symbol(s) => math_span(map_math_symbol(s).to_string(), zoom),
+        Expr::Symbol(s) => {
+            if let Some(sub) = s.strip_prefix("_C")
+                && !sub.is_empty()
+                && sub.chars().all(|c| c.is_ascii_digit())
+            {
+                return div()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .child(math_span_colored("C", zoom, color))
+                    .child(div().mt(px(4.0 * zoom)).child(math_span_colored(
+                        sub.to_string(),
+                        zoom * 0.72,
+                        color,
+                    )))
+                    .into_any_element();
+            }
+            math_span_colored(map_math_symbol(s).to_string(), zoom, color)
+        }
         Expr::UnaryNeg(inner) => {
             let row = div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(math_span("−", zoom))
-                .child(render_2d_math_node(inner, 4, false, zoom))
+                .child(math_span_colored("−", zoom, color))
+                .child(render_2d_math_node_colored(inner, 4, false, zoom, color))
                 .into_any_element();
             if parent_prec > 4 || (parent_prec == 5 && !is_rhs) {
-                wrap_parens(row, zoom)
+                wrap_parens_colored(row, zoom, color)
             } else {
                 row
             }
@@ -5257,32 +5605,32 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
             for (i, (neg, term)) in terms.into_iter().enumerate() {
                 if i == 0 {
                     if neg {
-                        row = row.child(math_span("−", zoom));
+                        row = row.child(math_span_colored("−", zoom, color));
                     }
-                    row = row.child(render_2d_math_node(term, 2, false, zoom));
+                    row = row.child(render_2d_math_node_colored(term, 2, false, zoom, color));
                 } else if !neg {
                     if let Some(pos) = extract_2d_neg(term) {
                         row = row
-                            .child(math_span("−", zoom))
-                            .child(render_2d_math_node(&pos, 2, true, zoom));
+                            .child(math_span_colored("−", zoom, color))
+                            .child(render_2d_math_node_colored(&pos, 2, true, zoom, color));
                     } else {
                         row = row
-                            .child(math_span("+", zoom))
-                            .child(render_2d_math_node(term, 2, false, zoom));
+                            .child(math_span_colored("+", zoom, color))
+                            .child(render_2d_math_node_colored(term, 2, false, zoom, color));
                     }
                 } else if let Some(pos) = extract_2d_neg(term) {
                     row = row
-                        .child(math_span("+", zoom))
-                        .child(render_2d_math_node(&pos, 2, false, zoom));
+                        .child(math_span_colored("+", zoom, color))
+                        .child(render_2d_math_node_colored(&pos, 2, false, zoom, color));
                 } else {
                     row = row
-                        .child(math_span("−", zoom))
-                        .child(render_2d_math_node(term, 2, true, zoom));
+                        .child(math_span_colored("−", zoom, color))
+                        .child(render_2d_math_node_colored(term, 2, true, zoom, color));
                 }
             }
             let elem = row.into_any_element();
             if parent_prec > 2 || (parent_prec == 2 && is_rhs) {
-                wrap_parens(elem, zoom)
+                wrap_parens_colored(elem, zoom, color)
             } else {
                 elem
             }
@@ -5295,44 +5643,49 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(math_span("−", zoom))
-                    .child(render_2d_math_node(rhs, 4, false, zoom))
+                    .child(math_span_colored("−", zoom, color))
+                    .child(render_2d_math_node_colored(rhs, 4, false, zoom, color))
                     .into_any_element()
             } else {
+                let tight_implicit = matches!(lhs.as_ref(), Expr::Rational(_) | Expr::Float(_))
+                    && !matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_));
                 let mut row = div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .child(render_2d_math_node(lhs, 3, false, zoom));
+                    .when(!tight_implicit, |el| el.gap_1())
+                    .child(render_2d_math_node_colored(lhs, 3, false, zoom, color));
                 if matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_)) {
-                    row = row.child(math_span("·", zoom));
+                    row = row.child(math_span_colored("·", zoom, color));
                 }
-                row.child(render_2d_math_node(rhs, 3, true, zoom))
+                row.child(render_2d_math_node_colored(rhs, 3, true, zoom, color))
                     .into_any_element()
             };
             if parent_prec > 3 {
-                wrap_parens(elem, zoom)
+                wrap_parens_colored(elem, zoom, color)
             } else {
                 elem
             }
         }
         Expr::Div(lhs, rhs) => {
-            let num_node = render_2d_math_node(lhs, 0, false, zoom * 0.92);
-            let den_node = render_2d_math_node(rhs, 0, false, zoom * 0.92);
-            let frac = render_stacked_fraction(num_node, den_node);
+            let num_node = render_2d_math_node_colored(lhs, 0, false, zoom * 0.92, color);
+            let den_node = render_2d_math_node_colored(rhs, 0, false, zoom * 0.92, color);
+            let frac = render_stacked_fraction_colored(num_node, den_node, color);
             if parent_prec > 3 {
-                wrap_parens(frac, zoom)
+                wrap_parens_colored(frac, zoom, color)
             } else {
                 frac
             }
         }
         Expr::Pow(base, exp) => {
-            let base_node = render_2d_math_node(base, 5, false, zoom);
-            let exp_node =
-                div()
-                    .mb(px(8.0 * zoom))
-                    .child(render_2d_math_node(exp, 0, true, zoom * 0.72));
+            let base_node = render_2d_math_node_colored(base, 5, false, zoom, color);
+            let exp_node = div().mb(px(8.0 * zoom)).child(render_2d_math_node_colored(
+                exp,
+                0,
+                true,
+                zoom * 0.72,
+                color,
+            ));
             let pow = div()
                 .flex()
                 .flex_row()
@@ -5341,23 +5694,305 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
                 .child(exp_node)
                 .into_any_element();
             if parent_prec > 5 || (parent_prec == 5 && !is_rhs) {
-                wrap_parens(pow, zoom)
+                wrap_parens_colored(pow, zoom, color)
             } else {
                 pow
             }
         }
         Expr::Call(name, args) => match name.as_str() {
+            "abs" if args.len() == 1 => div()
+                .px_1p5()
+                .py_0p5()
+                .border_l_2()
+                .border_r_2()
+                .border_color(color)
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(render_2d_math_node_colored(&args[0], 0, false, zoom, color))
+                .into_any_element(),
+            "And" if args.len() == 2 => {
+                if let (Expr::Inequality(op1, l1, r1), Expr::Inequality(op2, l2, r2)) =
+                    (&args[0], &args[1])
+                    && r1 == l2
+                {
+                    return div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .child(render_2d_math_node_colored(l1, 1, false, zoom, color))
+                        .child(math_span_colored(
+                            op1.pretty().trim().to_string(),
+                            zoom,
+                            color,
+                        ))
+                        .child(render_2d_math_node_colored(r1, 1, false, zoom, color))
+                        .child(math_span_colored(
+                            op2.pretty().trim().to_string(),
+                            zoom,
+                            color,
+                        ))
+                        .child(render_2d_math_node_colored(r2, 1, true, zoom, color))
+                        .into_any_element();
+                }
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1p5()
+                    .child(render_2d_math_node_colored(&args[0], 0, false, zoom, color))
+                    .child(math_span_colored("∧", zoom * 0.9, color))
+                    .child(render_2d_math_node_colored(&args[1], 0, false, zoom, color))
+                    .into_any_element()
+            }
+            "Or" if args.len() >= 2 => {
+                let mut row = div().flex().flex_row().flex_wrap().items_center().gap_2();
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        row = row.child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(rgb(0xeff6ff))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child("or"),
+                        );
+                    }
+                    row = row.child(render_2d_math_node_colored(a, 0, false, zoom, color));
+                }
+                row.into_any_element()
+            }
+            "diff" if args.len() == 2 => {
+                let (num_lbl, den_node) = match &args[1] {
+                    Expr::Call(op, sargs) if op == "$" && sargs.len() == 2 => (
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .child(math_span_colored("d", zoom * 0.86, color))
+                            .child(div().mb(px(5.0 * zoom)).child(render_2d_math_node_colored(
+                                &sargs[1],
+                                0,
+                                true,
+                                zoom * 0.65,
+                                color,
+                            )))
+                            .into_any_element(),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .child(math_span_colored("d", zoom * 0.86, color))
+                            .child(render_2d_math_node_colored(
+                                &sargs[0],
+                                5,
+                                false,
+                                zoom * 0.86,
+                                color,
+                            ))
+                            .child(div().mb(px(5.0 * zoom)).child(render_2d_math_node_colored(
+                                &sargs[1],
+                                0,
+                                true,
+                                zoom * 0.65,
+                                color,
+                            )))
+                            .into_any_element(),
+                    ),
+                    spec => (
+                        math_span_colored("d", zoom * 0.86, color),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(math_span_colored("d", zoom * 0.86, color))
+                            .child(render_2d_math_node_colored(
+                                spec,
+                                0,
+                                false,
+                                zoom * 0.86,
+                                color,
+                            ))
+                            .into_any_element(),
+                    ),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(render_stacked_fraction_colored(num_lbl, den_node, color))
+                    .child(render_2d_math_node_colored(&args[0], 4, false, zoom, color))
+                    .into_any_element()
+            }
+            "int" | "integrate" if args.len() == 2 => {
+                let (var_node, bounds) = match &args[1] {
+                    Expr::Equation(v, rhs) => match rhs.as_ref() {
+                        Expr::Range(a, b) => (
+                            render_2d_math_node_colored(v, 0, false, zoom, color),
+                            Some((a.as_ref(), b.as_ref())),
+                        ),
+                        _ => (
+                            render_2d_math_node_colored(&args[1], 0, false, zoom, color),
+                            None,
+                        ),
+                    },
+                    v => (render_2d_math_node_colored(v, 0, false, zoom, color), None),
+                };
+                let int_sym = match bounds {
+                    Some((a, b)) => div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_0p5()
+                        .child(math_span_colored("∫", zoom * 1.45, color))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .justify_between()
+                                .child(render_2d_math_node_colored(b, 0, false, zoom * 0.65, color))
+                                .child(render_2d_math_node_colored(
+                                    a,
+                                    0,
+                                    false,
+                                    zoom * 0.65,
+                                    color,
+                                )),
+                        )
+                        .into_any_element(),
+                    None => math_span_colored("∫", zoom * 1.45, color),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(int_sym)
+                    .child(render_2d_math_node_colored(&args[0], 2, false, zoom, color))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(math_span_colored("d", zoom, color))
+                            .child(var_node),
+                    )
+                    .into_any_element()
+            }
+            "limit" if args.len() == 2 => {
+                let sub_node = match &args[1] {
+                    Expr::Equation(v, pt) => div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_0p5()
+                        .child(render_2d_math_node_colored(v, 0, false, zoom * 0.68, color))
+                        .child(math_span_colored("→", zoom * 0.68, color))
+                        .child(render_2d_math_node_colored(
+                            pt,
+                            0,
+                            false,
+                            zoom * 0.68,
+                            color,
+                        ))
+                        .into_any_element(),
+                    other => render_2d_math_node_colored(other, 0, false, zoom * 0.68, color),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .child(math_span_colored("lim", zoom * 0.92, color))
+                            .child(sub_node),
+                    )
+                    .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color))
+                    .into_any_element()
+            }
+            "sum" | "Sum" if args.len() == 2 => {
+                let (lo_node, hi_node) = match &args[1] {
+                    Expr::Equation(k, rhs) => match rhs.as_ref() {
+                        Expr::Range(a, b) => (
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .child(render_2d_math_node_colored(k, 0, false, zoom * 0.65, color))
+                                .child(math_span_colored("=", zoom * 0.65, color))
+                                .child(render_2d_math_node_colored(a, 0, false, zoom * 0.65, color))
+                                .into_any_element(),
+                            Some(render_2d_math_node_colored(b, 0, false, zoom * 0.65, color)),
+                        ),
+                        _ => (
+                            render_2d_math_node_colored(&args[1], 0, false, zoom * 0.65, color),
+                            None,
+                        ),
+                    },
+                    other => (
+                        render_2d_math_node_colored(other, 0, false, zoom * 0.65, color),
+                        None,
+                    ),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .when_some(hi_node, |el, h| el.child(h))
+                            .child(math_span_colored("∑", zoom * 1.25, color))
+                            .child(lo_node),
+                    )
+                    .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color))
+                    .into_any_element()
+            }
+            "exp" if args.len() == 1 => div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .child(math_span_colored("e", zoom, color))
+                .child(div().mb(px(8.0 * zoom)).child(render_2d_math_node_colored(
+                    &args[0],
+                    0,
+                    true,
+                    zoom * 0.72,
+                    color,
+                )))
+                .into_any_element(),
+            "factorial" if args.len() == 1 => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(render_2d_math_node_colored(&args[0], 5, false, zoom, color))
+                .child(math_span_colored("!", zoom, color))
+                .into_any_element(),
             "sqrt" if args.len() == 1 => div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(math_span("√", zoom))
+                .child(math_span_colored("√", zoom, color))
                 .child(
                     div()
                         .px_1()
                         .border_t_1()
-                        .border_color(rgb(0x1d4ed8))
-                        .child(render_2d_math_node(&args[0], 0, false, zoom)),
+                        .border_color(color)
+                        .child(render_2d_math_node_colored(&args[0], 0, false, zoom, color)),
                 )
                 .into_any_element(),
             "__arrow__" if args.len() == 2 => div()
@@ -5367,53 +6002,60 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
                 .gap_1()
                 .child(match &args[0] {
                     Expr::List(params) if params.len() == 1 => {
-                        render_2d_math_node(&params[0], 0, false, zoom)
+                        render_2d_math_node_colored(&params[0], 0, false, zoom, color)
                     }
-                    other => render_2d_math_node(other, 0, false, zoom),
+                    other => render_2d_math_node_colored(other, 0, false, zoom, color),
                 })
-                .child(math_span("→", zoom))
-                .child(render_2d_math_node(&args[1], 0, false, zoom))
+                .child(math_span_colored("→", zoom, color))
+                .child(render_2d_math_node_colored(&args[1], 0, false, zoom, color))
                 .into_any_element(),
             _ => {
                 let mut row = div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(math_span(format!("{name}("), zoom));
+                    .child(math_span_colored(format!("{name}("), zoom, color));
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
-                        row = row.child(math_span(", ", zoom));
+                        row = row.child(math_span_colored(", ", zoom, color));
                     }
-                    row = row.child(render_2d_math_node(a, 0, false, zoom));
+                    row = row.child(render_2d_math_node_colored(a, 0, false, zoom, color));
                 }
-                row.child(math_span(")", zoom)).into_any_element()
+                row.child(math_span_colored(")", zoom, color))
+                    .into_any_element()
             }
         },
         Expr::Equation(lhs, rhs) => div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_1()
-            .child(render_2d_math_node(lhs, 1, false, zoom))
-            .child(math_span("=", zoom))
-            .child(render_2d_math_node(rhs, 1, true, zoom))
+            .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
+            .child(math_span_colored("=", zoom, color))
+            .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::Inequality(op, lhs, rhs) => div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_1()
-            .child(render_2d_math_node(lhs, 1, false, zoom))
-            .child(math_span(op.pretty().trim().to_string(), zoom))
-            .child(render_2d_math_node(rhs, 1, true, zoom))
+            .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
+            .child(math_span_colored(
+                op.pretty().trim().to_string(),
+                zoom,
+                color,
+            ))
+            .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::Range(lhs, rhs) => div()
             .flex()
             .flex_row()
             .items_center()
-            .child(render_2d_math_node(lhs, 1, false, zoom))
-            .child(math_span("..", zoom))
-            .child(render_2d_math_node(rhs, 1, true, zoom))
+            .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
+            .child(math_span_colored("..", zoom, color))
+            .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::List(items) => {
             let mut row = div()
@@ -5421,21 +6063,22 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
                 .flex_row()
                 .flex_wrap()
                 .items_center()
-                .child(math_span("[", zoom));
+                .child(math_span_colored("[", zoom, color));
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    row = row.child(math_span(", ", zoom));
+                    row = row.child(math_span_colored(", ", zoom, color));
                 }
-                row = row.child(render_2d_math_node(item, 0, false, zoom));
+                row = row.child(render_2d_math_node_colored(item, 0, false, zoom, color));
             }
-            row.child(math_span("]", zoom)).into_any_element()
+            row.child(math_span_colored("]", zoom, color))
+                .into_any_element()
         }
         Expr::Matrix(rows) => div()
             .px_3()
             .py_1p5()
             .border_l_2()
             .border_r_2()
-            .border_color(rgb(0x1d4ed8))
+            .border_color(color)
             .rounded_sm()
             .flex()
             .flex_col()
@@ -5452,7 +6095,13 @@ fn render_2d_math_node(expr: &Expr, parent_prec: u8, is_rhs: bool, zoom: f32) ->
                             .flex()
                             .justify_center()
                             .items_center()
-                            .child(render_2d_math_node(cell, 0, false, zoom * 0.94))
+                            .child(render_2d_math_node_colored(
+                                cell,
+                                0,
+                                false,
+                                zoom * 0.94,
+                                color,
+                            ))
                     }))
             }))
             .into_any_element(),

@@ -522,3 +522,28 @@ fn worksheet_loads_mpl_and_mw_files_and_updates_cell_in_place() {
     assert_eq!(loaded_mw.len(), 2);
     assert_eq!(ws_mw.cells[0].formatted_output(), "[x < 4]");
 }
+
+#[test]
+fn parser_and_solver_support_pipe_abs_and_rational_inequalities() {
+    let mut env = Environment::new();
+    assert_eq!(
+        eval_single_text(&mut env, "solve(|2*x - 3| < 5, x);"),
+        "[And(-1 < x, x < 4)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(2/x - 1 <= 7, x);"),
+        "[Or(x < 0, x >= 1/4)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(|2/x - 1| <= 7, x);"),
+        "[Or(x <= -1/3, x >= 1/4)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(5 <= |2/x - 1|, x);"),
+        "[Or(And(-1/2 <= x, x < 0), And(0 < x, x <= 1/3))]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(3 < |2/x - 1| < 7, x);"),
+        "[Or(And(-1 < x, x < -1/3), And(1/4 < x, x < 1/2))]"
+    );
+}
