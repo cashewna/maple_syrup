@@ -1,4 +1,4 @@
-use crate::ast::{Expr, Statement, Terminator};
+use crate::ast::{Expr, RelOp, Statement, Terminator};
 use crate::rational::Rational;
 use anyhow::{Result, bail};
 
@@ -18,6 +18,10 @@ enum Token {
     Slash,
     Caret,
     Equals,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
     Dollar,
     Comma,
     Semicolon,
@@ -134,6 +138,16 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                     i += 2;
                     continue;
                 }
+                "<=" => {
+                    tokens.push(Token::LessEq);
+                    i += 2;
+                    continue;
+                }
+                ">=" => {
+                    tokens.push(Token::GreaterEq);
+                    i += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -145,6 +159,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             '/' => Token::Slash,
             '^' => Token::Caret,
             '=' => Token::Equals,
+            '<' => Token::Less,
+            '>' => Token::Greater,
             '$' => Token::Dollar,
             ',' => Token::Comma,
             ';' => Token::Semicolon,
@@ -327,15 +343,40 @@ impl Parser {
         Ok(params)
     }
 
+    fn peek_rel_op(&self) -> Option<RelOp> {
+        match self.peek() {
+            Some(Token::Less) => Some(RelOp::Lt),
+            Some(Token::LessEq) => Some(RelOp::Le),
+            Some(Token::Greater) => Some(RelOp::Gt),
+            Some(Token::GreaterEq) => Some(RelOp::Ge),
+            _ => None,
+        }
+    }
+
     fn parse_equation(&mut self) -> Result<Expr> {
         let lhs = self.parse_range()?;
         if matches!(self.peek(), Some(Token::Equals)) {
             self.pos += 1;
             let rhs = self.parse_range()?;
-            Ok(Expr::Equation(Box::new(lhs), Box::new(rhs)))
-        } else {
-            Ok(lhs)
+            return Ok(Expr::Equation(Box::new(lhs), Box::new(rhs)));
         }
+        if let Some(op1) = self.peek_rel_op() {
+            self.pos += 1;
+            let mid = self.parse_range()?;
+            if let Some(op2) = self.peek_rel_op() {
+                self.pos += 1;
+                let rhs = self.parse_range()?;
+                return Ok(Expr::Call(
+                    "And".to_string(),
+                    vec![
+                        Expr::Inequality(op1, Box::new(lhs), Box::new(mid.clone())),
+                        Expr::Inequality(op2, Box::new(mid), Box::new(rhs)),
+                    ],
+                ));
+            }
+            return Ok(Expr::Inequality(op1, Box::new(lhs), Box::new(mid)));
+        }
+        Ok(lhs)
     }
 
     fn parse_range(&mut self) -> Result<Expr> {
@@ -430,15 +471,35 @@ impl Parser {
         }
     }
 
+    fn flatten_indexed_callee(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Symbol(s) => Some(s.clone()),
+            Expr::Call(name, args) if name == "__index__" && args.len() >= 2 => {
+                let mut head = Self::flatten_indexed_callee(&args[0])?;
+                let mut idxs = Vec::with_capacity(args.len() - 1);
+                for a in &args[1..] {
+                    match a {
+                        Expr::Symbol(s) => idxs.push(s.clone()),
+                        _ => return None,
+                    }
+                }
+                head.push('[');
+                head.push_str(&idxs.join(", "));
+                head.push(']');
+                Some(head)
+            }
+            _ => None,
+        }
+    }
+
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_atom()?;
         loop {
             match self.peek() {
                 Some(Token::LParen) => {
-                    let name = match expr {
-                        Expr::Symbol(s) => s,
-                        other => bail!("cannot call non-symbol expression `{other}`"),
-                    };
+                    let name = Self::flatten_indexed_callee(&expr).ok_or_else(|| {
+                        anyhow::anyhow!("cannot call non-symbol expression `{expr}`")
+                    })?;
                     self.pos += 1;
                     let args = self.parse_comma_list(Token::RParen)?;
                     expr = Expr::Call(name, args);

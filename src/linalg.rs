@@ -1,7 +1,7 @@
 use crate::ast::Expr;
 use crate::calculus::solve;
 use crate::rational::Rational;
-use crate::simplify::{evalf, simplify};
+use crate::simplify::{evalf, expand, simplify};
 use anyhow::{Result, bail};
 
 /// Construct a validated `Expr::Matrix` from Maple `Matrix(...)` arguments.
@@ -528,5 +528,115 @@ pub fn eigenvalues(expr: &Expr) -> Result<Expr> {
         });
         return Ok(Expr::List(diag));
     }
-    bail!("`Eigenvalues` currently supports 1x1, 2x2, and triangular matrices (got {n}x{n})")
+    if n <= 5 {
+        let lam = Expr::Symbol("__lambda".to_string());
+        let shifted = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, cell)| {
+                        if i == j {
+                            simplify(&Expr::Sub(Box::new(lam.clone()), Box::new(cell.clone())))
+                        } else {
+                            simplify(&Expr::UnaryNeg(Box::new(cell.clone())))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let char_poly = expand(&determinant(&Expr::Matrix(shifted))?);
+        return solve(&char_poly, "__lambda");
+    }
+    bail!("`Eigenvalues` supports up to 5x5 matrices (got {n}x{n})")
+}
+
+fn is_zero_expr(expr: &Expr) -> bool {
+    matches!(simplify(expr), Expr::Rational(r) if r.is_zero())
+}
+
+/// Matrix rank via exact reduced row echelon form.
+pub fn rank(expr: &Expr) -> Result<Expr> {
+    let reduced = rref(expr)?;
+    let rows = as_matrix(&reduced)?;
+    let count = rows
+        .iter()
+        .filter(|row| row.iter().any(|cell| !is_zero_expr(cell)))
+        .count();
+    Ok(Expr::Rational(Rational::from_int(count as i128)))
+}
+
+/// Exact null-space basis vectors `[v1, v2, ...]` satisfying `A * v_i = 0`.
+pub fn nullspace(expr: &Expr) -> Result<Expr> {
+    let reduced = rref(expr)?;
+    let rows = as_matrix(&reduced)?;
+    let nrows = rows.len();
+    let ncols = rows[0].len();
+
+    let mut pivot_rows: Vec<(usize, usize)> = Vec::new();
+    let mut is_pivot_col = vec![false; ncols];
+    for (r_idx, row) in rows.iter().enumerate().take(nrows) {
+        if let Some(pcol) = (0..ncols).find(|&c| !is_zero_expr(&row[c])) {
+            pivot_rows.push((r_idx, pcol));
+            is_pivot_col[pcol] = true;
+        }
+    }
+
+    let mut basis = Vec::new();
+    for (free_col, &piv) in is_pivot_col.iter().enumerate() {
+        if piv {
+            continue;
+        }
+        let mut vec_entries = vec![Expr::Rational(Rational::zero()); ncols];
+        vec_entries[free_col] = Expr::Rational(Rational::one());
+        for &(r_idx, pcol) in &pivot_rows {
+            vec_entries[pcol] = simplify(&Expr::UnaryNeg(Box::new(rows[r_idx][free_col].clone())));
+        }
+        basis.push(Expr::List(vec_entries));
+    }
+    Ok(Expr::List(basis))
+}
+
+/// Exact eigenvalues and associated null-space eigenvector bases.
+pub fn eigenvectors(expr: &Expr) -> Result<Expr> {
+    let rows = as_matrix(expr)?;
+    let n = rows.len();
+    if rows[0].len() != n {
+        bail!(
+            "`Eigenvectors` requires a square matrix, got {}x{}",
+            n,
+            rows[0].len()
+        );
+    }
+    let Expr::List(vals) = eigenvalues(expr)? else {
+        bail!("unexpected eigenvalue result");
+    };
+    let mut unique_vals: Vec<Expr> = Vec::new();
+    for v in &vals {
+        if !unique_vals.iter().any(|existing| existing == v) {
+            unique_vals.push(v.clone());
+        }
+    }
+    let mut bases = Vec::with_capacity(unique_vals.len());
+    for lam in &unique_vals {
+        let shifted = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, cell)| {
+                        if i == j {
+                            simplify(&Expr::Sub(Box::new(cell.clone()), Box::new(lam.clone())))
+                        } else {
+                            cell.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        bases.push(nullspace(&Expr::Matrix(shifted))?);
+    }
+    Ok(Expr::List(vec![Expr::List(vals), Expr::List(bases)]))
 }

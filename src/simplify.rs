@@ -57,6 +57,11 @@ fn subs_raw(var: &str, replacement: &Expr, target: &Expr) -> Expr {
             Box::new(subs_raw(var, replacement, a)),
             Box::new(subs_raw(var, replacement, b)),
         ),
+        Expr::Inequality(op, a, b) => Expr::Inequality(
+            *op,
+            Box::new(subs_raw(var, replacement, a)),
+            Box::new(subs_raw(var, replacement, b)),
+        ),
         Expr::Range(a, b) => Expr::Range(
             Box::new(subs_raw(var, replacement, a)),
             Box::new(subs_raw(var, replacement, b)),
@@ -125,7 +130,7 @@ pub fn evalf(expr: &Expr) -> Result<f64> {
 pub fn collect_symbols(expr: &Expr, out: &mut BTreeSet<String>) {
     match expr {
         Expr::Symbol(s) => {
-            if !matches!(s.as_str(), "Pi" | "pi" | "e" | "E" | "infinity") {
+            if !matches!(s.as_str(), "Pi" | "pi" | "e" | "E" | "I" | "infinity") {
                 out.insert(s.clone());
             }
         }
@@ -136,6 +141,7 @@ pub fn collect_symbols(expr: &Expr, out: &mut BTreeSet<String>) {
         | Expr::Div(a, b)
         | Expr::Pow(a, b)
         | Expr::Equation(a, b)
+        | Expr::Inequality(_, a, b)
         | Expr::Range(a, b) => {
             collect_symbols(a, out);
             collect_symbols(b, out);
@@ -169,6 +175,9 @@ pub fn simplify(expr: &Expr) -> Expr {
         Expr::Call(name, args) => simplify_call(name, args),
         Expr::Equation(lhs, rhs) => {
             Expr::Equation(Box::new(simplify(lhs)), Box::new(simplify(rhs)))
+        }
+        Expr::Inequality(op, lhs, rhs) => {
+            Expr::Inequality(*op, Box::new(simplify(lhs)), Box::new(simplify(rhs)))
         }
         Expr::Range(lhs, rhs) => Expr::Range(Box::new(simplify(lhs)), Box::new(simplify(rhs))),
         Expr::List(items) => Expr::List(items.iter().map(simplify).collect()),
@@ -292,8 +301,38 @@ fn simplify_call(name: &str, args: &[Expr]) -> Expr {
                 Expr::Symbol(s) if matches!(s.as_str(), "e" | "E" | "Pi" | "pi") => {
                     return Expr::Symbol(s.clone());
                 }
+                other if contains_imag_unit(other) => {
+                    if let Some((re, im)) = split_re_im(other) {
+                        let norm2 = simplify(&Expr::Add(
+                            Box::new(Expr::Pow(
+                                Box::new(re),
+                                Box::new(Expr::Rational(Rational::from_int(2))),
+                            )),
+                            Box::new(Expr::Pow(
+                                Box::new(im),
+                                Box::new(Expr::Rational(Rational::from_int(2))),
+                            )),
+                        ));
+                        return simplify(&Expr::Call("sqrt".to_string(), vec![norm2]));
+                    }
+                }
                 _ => {}
             },
+            "Re" => {
+                if let Some((re, _im)) = split_re_im(arg) {
+                    return simplify(&re);
+                }
+            }
+            "Im" => {
+                if let Some((_re, im)) = split_re_im(arg) {
+                    return simplify(&im);
+                }
+            }
+            "conjugate" => {
+                if let Some((re, im)) = split_re_im(arg) {
+                    return assemble_complex(re, simplify_neg(&simplify(&im)));
+                }
+            }
             "factorial" => {
                 if let Expr::Rational(r) = arg
                     && r.is_integer()
@@ -359,6 +398,28 @@ fn simplify_pow(base: &Expr, exp: &Expr) -> Expr {
         && e.is_positive()
     {
         return Expr::Rational(Rational::zero());
+    }
+    if matches!(base, Expr::Symbol(s) if s == "I")
+        && let Expr::Rational(e) = exp
+        && e.is_integer()
+    {
+        return match e.num.rem_euclid(4) {
+            0 => Expr::Rational(Rational::one()),
+            1 => Expr::Symbol("I".to_string()),
+            2 => Expr::Rational(Rational::from_int(-1)),
+            3 => Expr::UnaryNeg(Box::new(Expr::Symbol("I".to_string()))),
+            _ => unreachable!(),
+        };
+    }
+    if is_pure_complex_const(base)
+        && contains_imag_unit(base)
+        && let Expr::Rational(e) = exp
+        && e.is_integer()
+        && (0..=16).contains(&e.num)
+        && let Some((re, im)) =
+            split_re_im(&Expr::Pow(Box::new(base.clone()), Box::new(exp.clone())))
+    {
+        return assemble_complex(re, im);
     }
     if let (Expr::Rational(b), Expr::Rational(e)) = (base, exp) {
         if e.is_integer()
@@ -483,16 +544,27 @@ impl Term {
 
     fn degree_hint(&self) -> f64 {
         let mut deg = 0.0;
+        let mut has_i = false;
+        let mut has_other_sym = false;
         for (b, e) in &self.factors {
-            if matches!(b, Expr::Symbol(s) if !matches!(s.as_str(), "Pi" | "pi" | "e" | "E")) {
-                if let Expr::Rational(r) = e {
-                    deg += r.to_f64();
-                } else {
-                    deg += 1.0;
+            if let Expr::Symbol(s) = b {
+                if s == "I" {
+                    has_i = true;
+                } else if !matches!(s.as_str(), "Pi" | "pi" | "e" | "E") {
+                    has_other_sym = true;
+                    if let Expr::Rational(r) = e {
+                        deg += r.to_f64();
+                    } else {
+                        deg += 1.0;
+                    }
                 }
             } else if matches!(b, Expr::Call(_, _)) {
+                has_other_sym = true;
                 deg += 0.5;
             }
+        }
+        if has_i && !has_other_sym {
+            return -1.0;
         }
         deg
     }
@@ -573,6 +645,13 @@ fn simplify_product_or_div(expr: &Expr) -> Expr {
         other => other.clone(),
     };
 
+    if is_pure_complex_const(&s_expr)
+        && contains_imag_unit(&s_expr)
+        && let Some((re, im)) = split_re_im(&s_expr)
+    {
+        return assemble_complex(re, im);
+    }
+
     let mut coeff_rat = Rational::one();
     let mut coeff_float: Option<f64> = None;
     let mut raw_factors = Vec::new();
@@ -633,11 +712,26 @@ fn simplify_product_or_div(expr: &Expr) -> Expr {
             && r.is_negative()
         {
             let pos = Expr::Rational(-r);
-            den_factors.push(simplify_pow(&base, &pos));
+            let evaluated = simplify_pow(&base, &pos);
+            if let Expr::Rational(rv) = evaluated
+                && !rv.is_zero()
+                && let Ok(next) = coeff_rat.checked_div(rv)
+            {
+                coeff_rat = next;
+            } else {
+                den_factors.push(evaluated);
+            }
         } else if let Expr::UnaryNeg(inner) = sum_exp {
             den_factors.push(simplify_pow(&base, &inner));
         } else {
-            num_factors.push(simplify_pow(&base, &sum_exp));
+            let evaluated = simplify_pow(&base, &sum_exp);
+            if let Expr::Rational(rv) = evaluated
+                && let Ok(next) = coeff_rat.checked_mul(rv)
+            {
+                coeff_rat = next;
+            } else {
+                num_factors.push(evaluated);
+            }
         }
     }
 
@@ -891,22 +985,31 @@ fn simplify_sum(expr: &Expr) -> Expr {
         buckets.push((deg, key, expr));
     }
 
-    // Sort highest variable degree first, then lexicographically by key.
+    // Sort highest variable degree first, then constants, then pure imaginary (`I`) terms.
     buckets.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.1.cmp(&b.1))
     });
 
-    let mut terms: Vec<Expr> = buckets.into_iter().map(|(_, _, e)| e).collect();
+    let mut terms: Vec<Expr> = Vec::new();
+    let mut imag_terms: Vec<Expr> = Vec::new();
+    for (deg, _, e) in buckets {
+        if deg < 0.0 {
+            imag_terms.push(e);
+        } else {
+            terms.push(e);
+        }
+    }
     if let Some(fv) = const_float {
         let total = fv + const_rat.to_f64();
-        if total != 0.0 || terms.is_empty() {
+        if total != 0.0 || (terms.is_empty() && imag_terms.is_empty()) {
             terms.push(Expr::Float(if total == 0.0 { 0.0 } else { total }));
         }
-    } else if !const_rat.is_zero() || terms.is_empty() {
+    } else if !const_rat.is_zero() || (terms.is_empty() && imag_terms.is_empty()) {
         terms.push(Expr::Rational(const_rat));
     }
+    terms.extend(imag_terms);
 
     let mut iter = terms.into_iter();
     let mut acc = iter.next().unwrap();
@@ -914,6 +1017,224 @@ fn simplify_sum(expr: &Expr) -> Expr {
         acc = Expr::Add(Box::new(acc), Box::new(t));
     }
     acc
+}
+
+fn contains_imag_unit(expr: &Expr) -> bool {
+    match expr {
+        Expr::Symbol(s) => s == "I",
+        Expr::UnaryNeg(a) => contains_imag_unit(a),
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Pow(a, b)
+        | Expr::Equation(a, b)
+        | Expr::Inequality(_, a, b)
+        | Expr::Range(a, b) => contains_imag_unit(a) || contains_imag_unit(b),
+        Expr::Call(_, args) | Expr::List(args) => args.iter().any(contains_imag_unit),
+        Expr::Matrix(rows) => rows.iter().any(|r| r.iter().any(contains_imag_unit)),
+        Expr::Rational(_) | Expr::Float(_) => false,
+    }
+}
+
+fn is_pure_complex_const(expr: &Expr) -> bool {
+    let mut syms = BTreeSet::new();
+    collect_symbols(expr, &mut syms);
+    syms.is_empty()
+}
+
+fn split_re_im(expr: &Expr) -> Option<(Expr, Expr)> {
+    let zero = || Expr::Rational(Rational::zero());
+    match expr {
+        Expr::Rational(_) | Expr::Float(_) => Some((expr.clone(), zero())),
+        Expr::Symbol(s) if s == "I" => Some((zero(), Expr::Rational(Rational::one()))),
+        Expr::Symbol(_) => Some((expr.clone(), zero())),
+        Expr::UnaryNeg(a) => {
+            let (r, i) = split_re_im(a)?;
+            Some((simplify_neg(&r), simplify_neg(&i)))
+        }
+        Expr::Add(a, b) => {
+            let (r1, i1) = split_re_im(a)?;
+            let (r2, i2) = split_re_im(b)?;
+            Some((
+                simplify(&Expr::Add(Box::new(r1), Box::new(r2))),
+                simplify(&Expr::Add(Box::new(i1), Box::new(i2))),
+            ))
+        }
+        Expr::Sub(a, b) => {
+            let (r1, i1) = split_re_im(a)?;
+            let (r2, i2) = split_re_im(b)?;
+            Some((
+                simplify(&Expr::Sub(Box::new(r1), Box::new(r2))),
+                simplify(&Expr::Sub(Box::new(i1), Box::new(i2))),
+            ))
+        }
+        Expr::Mul(a, b) => {
+            let (r1, i1) = split_re_im(a)?;
+            let (r2, i2) = split_re_im(b)?;
+            let re = simplify(&Expr::Sub(
+                Box::new(Expr::Mul(Box::new(r1.clone()), Box::new(r2.clone()))),
+                Box::new(Expr::Mul(Box::new(i1.clone()), Box::new(i2.clone()))),
+            ));
+            let im = simplify(&Expr::Add(
+                Box::new(Expr::Mul(Box::new(r1), Box::new(i2))),
+                Box::new(Expr::Mul(Box::new(i1), Box::new(r2))),
+            ));
+            Some((re, im))
+        }
+        Expr::Div(a, b) => {
+            let (r1, i1) = split_re_im(a)?;
+            if !contains_imag_unit(b) {
+                return Some((
+                    simplify(&Expr::Div(Box::new(r1), b.clone())),
+                    simplify(&Expr::Div(Box::new(i1), b.clone())),
+                ));
+            }
+            let (r2, i2) = split_re_im(b)?;
+            let denom = simplify(&Expr::Add(
+                Box::new(Expr::Pow(
+                    Box::new(r2.clone()),
+                    Box::new(Expr::Rational(Rational::from_int(2))),
+                )),
+                Box::new(Expr::Pow(
+                    Box::new(i2.clone()),
+                    Box::new(Expr::Rational(Rational::from_int(2))),
+                )),
+            ));
+            let num_r = simplify(&Expr::Add(
+                Box::new(Expr::Mul(Box::new(r1.clone()), Box::new(r2.clone()))),
+                Box::new(Expr::Mul(Box::new(i1.clone()), Box::new(i2.clone()))),
+            ));
+            let num_i = simplify(&Expr::Sub(
+                Box::new(Expr::Mul(Box::new(i1), Box::new(r2))),
+                Box::new(Expr::Mul(Box::new(r1), Box::new(i2))),
+            ));
+            Some((
+                simplify(&Expr::Div(Box::new(num_r), Box::new(denom.clone()))),
+                simplify(&Expr::Div(Box::new(num_i), Box::new(denom))),
+            ))
+        }
+        Expr::Pow(base, exp) => {
+            if !contains_imag_unit(expr) {
+                return Some((expr.clone(), zero()));
+            }
+            if let Expr::Rational(r) = exp.as_ref()
+                && r.is_integer()
+                && (0..=16).contains(&r.num)
+            {
+                let base_pair = split_re_im(base)?;
+                let mut acc = (Expr::Rational(Rational::one()), zero());
+                for _ in 0..r.num {
+                    let nr = simplify(&Expr::Sub(
+                        Box::new(Expr::Mul(
+                            Box::new(acc.0.clone()),
+                            Box::new(base_pair.0.clone()),
+                        )),
+                        Box::new(Expr::Mul(
+                            Box::new(acc.1.clone()),
+                            Box::new(base_pair.1.clone()),
+                        )),
+                    ));
+                    let ni = simplify(&Expr::Add(
+                        Box::new(Expr::Mul(Box::new(acc.0), Box::new(base_pair.1.clone()))),
+                        Box::new(Expr::Mul(Box::new(acc.1), Box::new(base_pair.0.clone()))),
+                    ));
+                    acc = (nr, ni);
+                }
+                return Some(acc);
+            }
+            None
+        }
+        Expr::Call(_, args) => {
+            if args.iter().any(contains_imag_unit) {
+                None
+            } else {
+                Some((expr.clone(), zero()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn assemble_complex(re: Expr, im: Expr) -> Expr {
+    let r = simplify(&re);
+    let i = simplify(&im);
+    let r_zero =
+        matches!(&r, Expr::Rational(x) if x.is_zero()) || matches!(&r, Expr::Float(v) if *v == 0.0);
+    let i_zero =
+        matches!(&i, Expr::Rational(x) if x.is_zero()) || matches!(&i, Expr::Float(v) if *v == 0.0);
+
+    if i_zero {
+        return r;
+    }
+
+    let imag_term = match &i {
+        Expr::Rational(x) if x.is_one() => Expr::Symbol("I".to_string()),
+        Expr::Rational(x) if x.is_neg_one() => {
+            Expr::UnaryNeg(Box::new(Expr::Symbol("I".to_string())))
+        }
+        _ => Expr::Mul(Box::new(i), Box::new(Expr::Symbol("I".to_string()))),
+    };
+
+    if r_zero {
+        imag_term
+    } else {
+        Expr::Add(Box::new(r), Box::new(imag_term))
+    }
+}
+
+fn split_fraction_raw(expr: &Expr) -> (Expr, Expr) {
+    match expr {
+        Expr::Div(a, b) => ((**a).clone(), (**b).clone()),
+        Expr::UnaryNeg(a) => {
+            let (n, d) = split_fraction_raw(a);
+            (simplify_neg(&n), d)
+        }
+        Expr::Mul(a, b) => {
+            let (na, da) = split_fraction_raw(a);
+            let (nb, db) = split_fraction_raw(b);
+            (
+                Expr::Mul(Box::new(na), Box::new(nb)),
+                Expr::Mul(Box::new(da), Box::new(db)),
+            )
+        }
+        other => (other.clone(), Expr::Rational(Rational::one())),
+    }
+}
+
+/// Combine rational sums `A/B + C/D` into a single reduced fraction when simplification is requested.
+pub fn normal(expr: &Expr) -> Expr {
+    let mut terms = Vec::new();
+    collect_sum_terms(expr, false, &mut terms);
+    if terms.len() <= 1 {
+        return simplify(expr);
+    }
+    let has_div = terms
+        .iter()
+        .any(|t| !matches!(split_fraction_raw(t).1, Expr::Rational(r) if r.is_one()));
+    if !has_div {
+        return simplify(expr);
+    }
+
+    let (mut acc_num, mut acc_den) = split_fraction_raw(&terms[0]);
+    for t in &terms[1..] {
+        let (n, d) = split_fraction_raw(t);
+        if acc_den == d {
+            acc_num = Expr::Add(Box::new(acc_num), Box::new(n));
+        } else {
+            acc_num = Expr::Add(
+                Box::new(Expr::Mul(Box::new(acc_num), Box::new(d.clone()))),
+                Box::new(Expr::Mul(Box::new(n), Box::new(acc_den.clone()))),
+            );
+            acc_den = Expr::Mul(Box::new(acc_den), Box::new(d));
+        }
+    }
+    let exp_num = expand(&acc_num);
+    if matches!(&exp_num, Expr::Rational(r) if r.is_zero()) {
+        return Expr::Rational(Rational::zero());
+    }
+    let exp_den = expand(&acc_den);
+    simplify(&Expr::Div(Box::new(exp_num), Box::new(exp_den)))
 }
 
 /// Expand products and positive integer powers of sums algebraically.

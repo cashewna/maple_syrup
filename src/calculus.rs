@@ -1,4 +1,4 @@
-use crate::ast::Expr;
+use crate::ast::{Expr, RelOp};
 use crate::rational::Rational;
 use crate::simplify::{evalf, expand, extract_poly, simplify, subs};
 use anyhow::{Result, bail};
@@ -14,6 +14,7 @@ pub fn depends_on(expr: &Expr, var: &str) -> bool {
         | Expr::Div(a, b)
         | Expr::Pow(a, b)
         | Expr::Equation(a, b)
+        | Expr::Inequality(_, a, b)
         | Expr::Range(a, b) => depends_on(a, var) || depends_on(b, var),
         Expr::Call(_, args) | Expr::List(args) => args.iter().any(|a| depends_on(a, var)),
         Expr::Matrix(rows) => rows.iter().any(|r| r.iter().any(|c| depends_on(c, var))),
@@ -831,8 +832,20 @@ pub fn series(expr: &Expr, var: &str, point: &Expr, order: usize) -> Result<Expr
     Ok(acc)
 }
 
-/// Symbolically solve an equation or zero-expression for `var`, returning a Maple `List` of roots.
+/// Symbolically solve an equation, inequality, or zero-expression for `var`, returning a Maple `List`.
 pub fn solve(expr: &Expr, var: &str) -> Result<Expr> {
+    if let Expr::Call(name, args) = expr
+        && name == "And"
+        && args.len() == 2
+        && args.iter().all(|a| matches!(a, Expr::Inequality(_, _, _)))
+    {
+        return solve_and_inequalities(&args[0], &args[1], var);
+    }
+
+    if let Expr::Inequality(op, lhs, rhs) = expr {
+        return solve_inequality(*op, lhs, rhs, var);
+    }
+
     let target = match expr {
         Expr::Equation(lhs, rhs) => simplify(&Expr::Sub(lhs.clone(), rhs.clone())),
         other => simplify(other),
@@ -1061,4 +1074,919 @@ fn isolate_var(lhs: &Expr, rhs: &Expr, var: &str) -> Option<Expr> {
         }
         _ => None,
     }
+}
+
+#[derive(Clone, Debug)]
+struct IntervalBounds {
+    lo: Option<(Expr, bool)>,
+    hi: Option<(Expr, bool)>,
+}
+
+fn as_abs_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Call(name, args) if name == "abs" && args.len() == 1 => Some(&args[0]),
+        _ => None,
+    }
+}
+
+fn solve_inequality_to_interval(
+    op: RelOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    var: &str,
+) -> Result<IntervalBounds> {
+    let res = solve_inequality(op, lhs, rhs, var)?;
+    let Expr::List(items) = res else {
+        bail!("unexpected inequality result");
+    };
+    if items.is_empty() {
+        return Ok(IntervalBounds {
+            lo: Some((Expr::Rational(Rational::one()), false)),
+            hi: Some((Expr::Rational(Rational::zero()), false)),
+        });
+    }
+    if items.len() == 1
+        && let Expr::Inequality(rop, rlhs, rrhs) = &items[0]
+        && matches!(rlhs.as_ref(), Expr::Symbol(s) if s == var)
+    {
+        return Ok(match rop {
+            RelOp::Lt => IntervalBounds {
+                lo: None,
+                hi: Some(((**rrhs).clone(), false)),
+            },
+            RelOp::Le => IntervalBounds {
+                lo: None,
+                hi: Some(((**rrhs).clone(), true)),
+            },
+            RelOp::Gt => IntervalBounds {
+                lo: Some(((**rrhs).clone(), false)),
+                hi: None,
+            },
+            RelOp::Ge => IntervalBounds {
+                lo: Some(((**rrhs).clone(), true)),
+                hi: None,
+            },
+        });
+    }
+    bail!(
+        "inequality `{lhs} {} {rhs}` does not form a single half-line",
+        op.ascii()
+    )
+}
+
+fn solve_and_inequalities(left: &Expr, right: &Expr, var: &str) -> Result<Expr> {
+    let Expr::Inequality(op1, l1, r1) = left else {
+        bail!("expected inequality, got `{left}`");
+    };
+    let Expr::Inequality(op2, l2, r2) = right else {
+        bail!("expected inequality, got `{right}`");
+    };
+    let b1 = solve_inequality_to_interval(*op1, l1, r1, var)?;
+    let b2 = solve_inequality_to_interval(*op2, l2, r2, var)?;
+
+    let lo = match (b1.lo, b2.lo) {
+        (Some(a), Some(b)) => {
+            if evalf(&a.0)? >= evalf(&b.0)? {
+                Some(a)
+            } else {
+                Some(b)
+            }
+        }
+        (a, b) => a.or(b),
+    };
+    let hi = match (b1.hi, b2.hi) {
+        (Some(a), Some(b)) => {
+            if evalf(&a.0)? <= evalf(&b.0)? {
+                Some(a)
+            } else {
+                Some(b)
+            }
+        }
+        (a, b) => a.or(b),
+    };
+
+    match (lo, hi) {
+        (Some((lval, linc)), Some((hval, hinc))) => {
+            let lv = evalf(&lval)?;
+            let hv = evalf(&hval)?;
+            if lv > hv || (lv == hv && (!linc || !hinc)) {
+                return Ok(Expr::List(Vec::new()));
+            }
+            if lv == hv {
+                return Ok(Expr::List(vec![Expr::Equation(
+                    Box::new(Expr::Symbol(var.to_string())),
+                    Box::new(lval),
+                )]));
+            }
+            let x = Expr::Symbol(var.to_string());
+            let low_cond = Expr::Inequality(
+                if linc { RelOp::Le } else { RelOp::Lt },
+                Box::new(lval),
+                Box::new(x.clone()),
+            );
+            let high_cond = Expr::Inequality(
+                if hinc { RelOp::Le } else { RelOp::Lt },
+                Box::new(x),
+                Box::new(hval),
+            );
+            Ok(Expr::List(vec![Expr::Call(
+                "And".to_string(),
+                vec![low_cond, high_cond],
+            )]))
+        }
+        (Some((lval, linc)), None) => Ok(Expr::List(vec![Expr::Inequality(
+            if linc { RelOp::Ge } else { RelOp::Gt },
+            Box::new(Expr::Symbol(var.to_string())),
+            Box::new(lval),
+        )])),
+        (None, Some((hval, hinc))) => Ok(Expr::List(vec![Expr::Inequality(
+            if hinc { RelOp::Le } else { RelOp::Lt },
+            Box::new(Expr::Symbol(var.to_string())),
+            Box::new(hval),
+        )])),
+        (None, None) => Ok(Expr::List(Vec::new())),
+    }
+}
+
+fn solve_inequality(op: RelOp, lhs: &Expr, rhs: &Expr, var: &str) -> Result<Expr> {
+    if let (Some(a), Some(b)) = (as_abs_arg(lhs), as_abs_arg(rhs)) {
+        let diff_sq = simplify(&Expr::Sub(
+            Box::new(Expr::Pow(
+                Box::new(a.clone()),
+                Box::new(Expr::Rational(Rational::from_int(2))),
+            )),
+            Box::new(Expr::Pow(
+                Box::new(b.clone()),
+                Box::new(Expr::Rational(Rational::from_int(2))),
+            )),
+        ));
+        return solve_inequality(op, &diff_sq, &Expr::Rational(Rational::zero()), var);
+    }
+
+    if let Some(inner) = as_abs_arg(lhs) {
+        let neg_rhs = simplify(&Expr::UnaryNeg(Box::new(rhs.clone())));
+        return match op {
+            RelOp::Lt | RelOp::Le => {
+                let c1 = Expr::Inequality(op, Box::new(neg_rhs), Box::new(inner.clone()));
+                let c2 = Expr::Inequality(op, Box::new(inner.clone()), Box::new(rhs.clone()));
+                solve_and_inequalities(&c1, &c2, var)
+            }
+            RelOp::Gt | RelOp::Ge => {
+                let left_op = if op == RelOp::Ge {
+                    RelOp::Le
+                } else {
+                    RelOp::Lt
+                };
+                let right_op = op;
+                let Expr::List(mut left_sol) = solve_inequality(left_op, inner, &neg_rhs, var)?
+                else {
+                    unreachable!()
+                };
+                let Expr::List(mut right_sol) = solve_inequality(right_op, inner, rhs, var)? else {
+                    unreachable!()
+                };
+                if left_sol.len() == 1 && right_sol.len() == 1 {
+                    let a = left_sol.pop().unwrap();
+                    let b = right_sol.pop().unwrap();
+                    return Ok(Expr::List(vec![Expr::Call("Or".to_string(), vec![a, b])]));
+                }
+                left_sol.extend(right_sol);
+                Ok(Expr::List(left_sol))
+            }
+        };
+    }
+
+    if as_abs_arg(rhs).is_some() {
+        return solve_inequality(op.flip(), rhs, lhs, var);
+    }
+
+    let target = simplify(&expand(&Expr::Sub(
+        Box::new(lhs.clone()),
+        Box::new(rhs.clone()),
+    )));
+    let x_sym = Expr::Symbol(var.to_string());
+    if let Some(poly) = extract_poly(&target, var) {
+        let deg = poly.len().saturating_sub(1);
+        match deg {
+            0 => {
+                let c = poly[0];
+                let holds = match op {
+                    RelOp::Lt => c < Rational::zero(),
+                    RelOp::Le => c <= Rational::zero(),
+                    RelOp::Gt => c > Rational::zero(),
+                    RelOp::Ge => c >= Rational::zero(),
+                };
+                if holds {
+                    return Ok(Expr::List(vec![x_sym]));
+                }
+                return Ok(Expr::List(Vec::new()));
+            }
+            1 => {
+                let b = poly[0];
+                let a = poly[1];
+                let root = -(b / a);
+                let eff = if a.is_negative() { op.flip() } else { op };
+                return Ok(Expr::List(vec![Expr::Inequality(
+                    eff,
+                    Box::new(x_sym),
+                    Box::new(Expr::Rational(root)),
+                )]));
+            }
+            2 => {
+                let (c, b, a) = (poly[0], poly[1], poly[2]);
+                let roots = solve_quadratic(a, b, c);
+                if roots.len() == 2 && evalf(&roots[0]).is_ok() && evalf(&roots[1]).is_ok() {
+                    let (mut r1, mut r2) = (roots[0].clone(), roots[1].clone());
+                    if evalf(&r1)? > evalf(&r2)? {
+                        std::mem::swap(&mut r1, &mut r2);
+                    }
+                    let inclusive = matches!(op, RelOp::Le | RelOp::Ge);
+                    let between = (a.is_positive() && matches!(op, RelOp::Lt | RelOp::Le))
+                        || (a.is_negative() && matches!(op, RelOp::Gt | RelOp::Ge));
+                    if between {
+                        let cop = if inclusive { RelOp::Le } else { RelOp::Lt };
+                        return Ok(Expr::List(vec![Expr::Call(
+                            "And".to_string(),
+                            vec![
+                                Expr::Inequality(cop, Box::new(r1), Box::new(x_sym.clone())),
+                                Expr::Inequality(cop, Box::new(x_sym), Box::new(r2)),
+                            ],
+                        )]));
+                    } else {
+                        let lop = if inclusive { RelOp::Le } else { RelOp::Lt };
+                        let rop = if inclusive { RelOp::Ge } else { RelOp::Gt };
+                        return Ok(Expr::List(vec![Expr::Call(
+                            "Or".to_string(),
+                            vec![
+                                Expr::Inequality(lop, Box::new(x_sym.clone()), Box::new(r1)),
+                                Expr::Inequality(rop, Box::new(x_sym), Box::new(r2)),
+                            ],
+                        )]));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    bail!(
+        "unable to symbolically solve inequality `{lhs} {} {rhs}` for `{var}`",
+        op.ascii()
+    )
+}
+
+fn replace_ode_terms(expr: &Expr, y_name: &str, indep: &mut Option<String>) -> Expr {
+    match expr {
+        Expr::Call(name, args) if name == "diff" && args.len() == 2 => {
+            let is_y = matches!(&args[0], Expr::Symbol(s) if s == y_name)
+                || matches!(&args[0], Expr::Call(fn_name, _) if fn_name == y_name);
+            if is_y {
+                match &args[1] {
+                    Expr::Symbol(v) => {
+                        *indep = Some(v.clone());
+                        return Expr::Symbol("__dy1".to_string());
+                    }
+                    Expr::Call(op, sargs) if op == "$" && sargs.len() == 2 => {
+                        if let Expr::Symbol(v) = &sargs[0] {
+                            *indep = Some(v.clone());
+                        }
+                        if matches!(&sargs[1], Expr::Rational(r) if *r == Rational::from_int(2)) {
+                            return Expr::Symbol("__dy2".to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            expr.clone()
+        }
+        Expr::Call(name, args) if name == y_name && args.len() == 1 => {
+            if let Expr::Symbol(v) = &args[0] {
+                *indep = Some(v.clone());
+            }
+            Expr::Symbol("__dy0".to_string())
+        }
+        Expr::Symbol(s) if s == y_name => Expr::Symbol("__dy0".to_string()),
+        Expr::UnaryNeg(a) => Expr::UnaryNeg(Box::new(replace_ode_terms(a, y_name, indep))),
+        Expr::Add(a, b) => Expr::Add(
+            Box::new(replace_ode_terms(a, y_name, indep)),
+            Box::new(replace_ode_terms(b, y_name, indep)),
+        ),
+        Expr::Sub(a, b) => Expr::Sub(
+            Box::new(replace_ode_terms(a, y_name, indep)),
+            Box::new(replace_ode_terms(b, y_name, indep)),
+        ),
+        Expr::Mul(a, b) => Expr::Mul(
+            Box::new(replace_ode_terms(a, y_name, indep)),
+            Box::new(replace_ode_terms(b, y_name, indep)),
+        ),
+        Expr::Div(a, b) => Expr::Div(
+            Box::new(replace_ode_terms(a, y_name, indep)),
+            Box::new(replace_ode_terms(b, y_name, indep)),
+        ),
+        Expr::Pow(a, b) => Expr::Pow(
+            Box::new(replace_ode_terms(a, y_name, indep)),
+            Box::new(replace_ode_terms(b, y_name, indep)),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn eval_ode_residual(res: &Expr, d2: i128, d1: i128, d0: i128) -> Expr {
+    let e = subs("__dy2", &Expr::Rational(Rational::from_int(d2)), res);
+    let e = subs("__dy1", &Expr::Rational(Rational::from_int(d1)), &e);
+    subs("__dy0", &Expr::Rational(Rational::from_int(d0)), &e)
+}
+
+/// Solve ordinary differential equations (`dsolve(ode, y)` or `dsolve([ode, ic], y)`).
+pub fn dsolve(ode_spec: &Expr, y_target: &Expr) -> Result<Expr> {
+    let y_name = match y_target {
+        Expr::Symbol(s) => s.clone(),
+        Expr::Call(s, _) => s.clone(),
+        other => bail!("`dsolve` target must be function/variable `y`, got `{other}`"),
+    };
+
+    let (ode_expr, ics) = match ode_spec {
+        Expr::List(items) if !items.is_empty() => (items[0].clone(), &items[1..]),
+        other => (other.clone(), &[][..]),
+    };
+
+    let raw_residual = match &ode_expr {
+        Expr::Equation(lhs, rhs) => Expr::Sub(lhs.clone(), rhs.clone()),
+        other => other.clone(),
+    };
+    let mut indep = None;
+    let rep = replace_ode_terms(&raw_residual, &y_name, &mut indep);
+    let x_var = indep.unwrap_or_else(|| "x".to_string());
+    let x_sym = Expr::Symbol(x_var.clone());
+
+    let f0 = eval_ode_residual(&rep, 0, 0, 0);
+    let c_coeff = simplify(&Expr::Sub(
+        Box::new(eval_ode_residual(&rep, 0, 0, 1)),
+        Box::new(f0.clone()),
+    ));
+    let b_coeff = simplify(&Expr::Sub(
+        Box::new(eval_ode_residual(&rep, 0, 1, 0)),
+        Box::new(f0.clone()),
+    ));
+    let a_coeff = simplify(&Expr::Sub(
+        Box::new(eval_ode_residual(&rep, 1, 0, 0)),
+        Box::new(f0.clone()),
+    ));
+
+    let is_zero = |e: &Expr| matches!(simplify(e), Expr::Rational(r) if r.is_zero());
+
+    if is_zero(&a_coeff) && !is_zero(&b_coeff) && is_zero(&c_coeff) {
+        let rhs_fn = simplify(&Expr::Div(
+            Box::new(simplify(&Expr::UnaryNeg(Box::new(f0)))),
+            Box::new(b_coeff),
+        ));
+        let anti = integrate(&rhs_fn, &x_var)?;
+        let mut sol = simplify(&Expr::Add(
+            Box::new(anti),
+            Box::new(Expr::Symbol("_C1".to_string())),
+        ));
+        if let Some(Expr::Equation(ic_l, ic_r)) = ics.first()
+            && let Expr::Call(fn_name, ic_args) = ic_l.as_ref()
+            && fn_name == &y_name
+            && ic_args.len() == 1
+        {
+            let at_x0 = subs(&x_var, &ic_args[0], &sol);
+            let c_val = simplify(&Expr::Sub(
+                ic_r.clone(),
+                Box::new(subs("_C1", &Expr::Rational(Rational::zero()), &at_x0)),
+            ));
+            sol = subs("_C1", &c_val, &sol);
+        }
+        return Ok(Expr::Equation(
+            Box::new(y_target.clone()),
+            Box::new(simplify(&sol)),
+        ));
+    }
+
+    if is_zero(&a_coeff) && !is_zero(&b_coeff) && is_zero(&f0) {
+        let rate = simplify(&Expr::Div(
+            Box::new(Expr::UnaryNeg(Box::new(c_coeff))),
+            Box::new(b_coeff),
+        ));
+        let exp_term = simplify(&Expr::Call(
+            "exp".to_string(),
+            vec![simplify(&Expr::Mul(Box::new(rate), Box::new(x_sym)))],
+        ));
+        let mut sol = Expr::Mul(
+            Box::new(Expr::Symbol("_C1".to_string())),
+            Box::new(exp_term),
+        );
+        if let Some(Expr::Equation(ic_l, ic_r)) = ics.first()
+            && let Expr::Call(fn_name, ic_args) = ic_l.as_ref()
+            && fn_name == &y_name
+            && ic_args.len() == 1
+        {
+            let basis0 = subs(
+                &x_var,
+                &ic_args[0],
+                &subs("_C1", &Expr::Rational(Rational::one()), &sol),
+            );
+            let c_val = simplify(&Expr::Div(ic_r.clone(), Box::new(basis0)));
+            sol = subs("_C1", &c_val, &sol);
+        }
+        return Ok(Expr::Equation(
+            Box::new(y_target.clone()),
+            Box::new(simplify(&sol)),
+        ));
+    }
+
+    if !is_zero(&a_coeff) && is_zero(&f0) {
+        let disc = simplify(&Expr::Sub(
+            Box::new(Expr::Pow(
+                Box::new(b_coeff.clone()),
+                Box::new(Expr::Rational(Rational::from_int(2))),
+            )),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Rational(Rational::from_int(4))),
+                Box::new(Expr::Mul(
+                    Box::new(a_coeff.clone()),
+                    Box::new(c_coeff.clone()),
+                )),
+            )),
+        ));
+        let two_a = simplify(&Expr::Mul(
+            Box::new(Expr::Rational(Rational::from_int(2))),
+            Box::new(a_coeff.clone()),
+        ));
+        let d_val = evalf(&disc)?;
+        let mut sol = if d_val > 1e-12 {
+            let sd = simplify(&Expr::Call("sqrt".to_string(), vec![disc]));
+            let r1 = simplify(&Expr::Div(
+                Box::new(Expr::Sub(
+                    Box::new(Expr::UnaryNeg(Box::new(b_coeff.clone()))),
+                    Box::new(sd.clone()),
+                )),
+                Box::new(two_a.clone()),
+            ));
+            let r2 = simplify(&Expr::Div(
+                Box::new(Expr::Add(
+                    Box::new(Expr::UnaryNeg(Box::new(b_coeff))),
+                    Box::new(sd),
+                )),
+                Box::new(two_a),
+            ));
+            let e1 = Expr::Call(
+                "exp".to_string(),
+                vec![simplify(&Expr::Mul(Box::new(r1), Box::new(x_sym.clone())))],
+            );
+            let e2 = Expr::Call(
+                "exp".to_string(),
+                vec![simplify(&Expr::Mul(Box::new(r2), Box::new(x_sym)))],
+            );
+            Expr::Add(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Symbol("_C1".to_string())),
+                    Box::new(e1),
+                )),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Symbol("_C2".to_string())),
+                    Box::new(e2),
+                )),
+            )
+        } else if d_val.abs() <= 1e-12 {
+            let r = simplify(&Expr::Div(
+                Box::new(Expr::UnaryNeg(Box::new(b_coeff))),
+                Box::new(two_a),
+            ));
+            let e = Expr::Call(
+                "exp".to_string(),
+                vec![simplify(&Expr::Mul(Box::new(r), Box::new(x_sym.clone())))],
+            );
+            Expr::Mul(
+                Box::new(Expr::Add(
+                    Box::new(Expr::Symbol("_C1".to_string())),
+                    Box::new(Expr::Mul(
+                        Box::new(Expr::Symbol("_C2".to_string())),
+                        Box::new(x_sym),
+                    )),
+                )),
+                Box::new(e),
+            )
+        } else {
+            let alpha = simplify(&Expr::Div(
+                Box::new(Expr::UnaryNeg(Box::new(b_coeff))),
+                Box::new(two_a.clone()),
+            ));
+            let beta = simplify(&Expr::Div(
+                Box::new(simplify(&Expr::Call(
+                    "sqrt".to_string(),
+                    vec![simplify(&Expr::UnaryNeg(Box::new(disc)))],
+                ))),
+                Box::new(two_a),
+            ));
+            let bx = simplify(&Expr::Mul(Box::new(beta), Box::new(x_sym.clone())));
+            let osc = Expr::Add(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Symbol("_C1".to_string())),
+                    Box::new(Expr::Call("cos".to_string(), vec![bx.clone()])),
+                )),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Symbol("_C2".to_string())),
+                    Box::new(Expr::Call("sin".to_string(), vec![bx])),
+                )),
+            );
+            if is_zero(&alpha) {
+                osc
+            } else {
+                let env = Expr::Call(
+                    "exp".to_string(),
+                    vec![simplify(&Expr::Mul(Box::new(alpha), Box::new(x_sym)))],
+                );
+                Expr::Mul(Box::new(env), Box::new(osc))
+            }
+        };
+
+        if ics.len() == 2 {
+            let y1 = subs(
+                "_C2",
+                &Expr::Rational(Rational::zero()),
+                &subs("_C1", &Expr::Rational(Rational::one()), &sol),
+            );
+            let y2 = subs(
+                "_C1",
+                &Expr::Rational(Rational::zero()),
+                &subs("_C2", &Expr::Rational(Rational::one()), &sol),
+            );
+            let dy1 = differentiate(&y1, &x_var)?;
+            let dy2 = differentiate(&y2, &x_var)?;
+            if let (Some(Expr::Equation(l1, r1)), Some(Expr::Equation(l2, r2))) =
+                (ics.first(), ics.get(1))
+                && let (Expr::Call(_, a1), Expr::Call(_, a2)) = (l1.as_ref(), l2.as_ref())
+                && a1.len() == 1
+                && a2.len() == 1
+            {
+                let (m11, m12) = (subs(&x_var, &a1[0], &y1), subs(&x_var, &a1[0], &y2));
+                let (m21, m22) = (subs(&x_var, &a2[0], &dy1), subs(&x_var, &a2[0], &dy2));
+                let det = simplify(&Expr::Sub(
+                    Box::new(Expr::Mul(Box::new(m11.clone()), Box::new(m22.clone()))),
+                    Box::new(Expr::Mul(Box::new(m12.clone()), Box::new(m21.clone()))),
+                ));
+                if !is_zero(&det) {
+                    let c1 = simplify(&Expr::Div(
+                        Box::new(Expr::Sub(
+                            Box::new(Expr::Mul(Box::new(r1.as_ref().clone()), Box::new(m22))),
+                            Box::new(Expr::Mul(Box::new(m12), Box::new(r2.as_ref().clone()))),
+                        )),
+                        Box::new(det.clone()),
+                    ));
+                    let c2 = simplify(&Expr::Div(
+                        Box::new(Expr::Sub(
+                            Box::new(Expr::Mul(Box::new(m11), Box::new(r2.as_ref().clone()))),
+                            Box::new(Expr::Mul(Box::new(r1.as_ref().clone()), Box::new(m21))),
+                        )),
+                        Box::new(det),
+                    ));
+                    sol = subs("_C2", &c2, &subs("_C1", &c1, &sol));
+                }
+            }
+        }
+        return Ok(Expr::Equation(
+            Box::new(y_target.clone()),
+            Box::new(simplify(&sol)),
+        ));
+    }
+
+    bail!("unsupported ODE `{ode_expr}` for `dsolve`")
+}
+
+fn poly_mul_rat(a: &[Rational], b: &[Rational]) -> Vec<Rational> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Rational::zero(); a.len() + b.len() - 1];
+    for (i, &ca) in a.iter().enumerate() {
+        for (j, &cb) in b.iter().enumerate() {
+            out[i + j] = out[i + j] + ca * cb;
+        }
+    }
+    out
+}
+
+fn poly_div_rem_rat(num: &[Rational], den: &[Rational]) -> (Vec<Rational>, Vec<Rational>) {
+    let mut rem = num.to_vec();
+    while rem.len() > 1 && rem.last().is_some_and(|c| c.is_zero()) {
+        rem.pop();
+    }
+    let d_deg = den.len() - 1;
+    let lc = den[d_deg];
+    if rem.len() < den.len() {
+        return (vec![Rational::zero()], rem);
+    }
+    let mut quo = vec![Rational::zero(); rem.len() - d_deg];
+    for k in (d_deg..rem.len()).rev() {
+        let factor = rem[k] / lc;
+        let shift = k - d_deg;
+        quo[shift] = factor;
+        for j in 0..=d_deg {
+            rem[shift + j] = rem[shift + j] - factor * den[j];
+        }
+    }
+    while rem.len() > 1 && rem.last().is_some_and(|c| c.is_zero()) {
+        rem.pop();
+    }
+    (quo, rem)
+}
+
+fn poly_to_expr(poly: &[Rational], var: &str) -> Expr {
+    let mut acc = Expr::Rational(Rational::zero());
+    for (deg, &c) in poly.iter().enumerate() {
+        if c.is_zero() {
+            continue;
+        }
+        let term = match deg {
+            0 => Expr::Rational(c),
+            1 => Expr::Mul(
+                Box::new(Expr::Rational(c)),
+                Box::new(Expr::Symbol(var.to_string())),
+            ),
+            d => Expr::Mul(
+                Box::new(Expr::Rational(c)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Symbol(var.to_string())),
+                    Box::new(Expr::Rational(Rational::from_int(d as i128))),
+                )),
+            ),
+        };
+        acc = Expr::Add(Box::new(acc), Box::new(term));
+    }
+    simplify(&acc)
+}
+
+/// Partial fraction decomposition of a rational function over rational roots (`convert(f, parfrac, x)`).
+pub fn partial_fractions(expr: &Expr, var: &str) -> Result<Expr> {
+    let (num_raw, den_raw) = match expr {
+        Expr::Div(n, d) => (expand(n), expand(d)),
+        other => return Ok(simplify(other)),
+    };
+    if !depends_on(&den_raw, var) {
+        return Ok(simplify(expr));
+    }
+    let Some(p_poly) = extract_poly(&num_raw, var) else {
+        bail!("partial fractions requires polynomial numerator in `{var}`");
+    };
+    let Some(q_poly) = extract_poly(&den_raw, var) else {
+        bail!("partial fractions requires polynomial denominator in `{var}`");
+    };
+    if q_poly.len() <= 2 {
+        return Ok(simplify(expr));
+    }
+
+    let q_lc = *q_poly.last().unwrap();
+    let p_norm: Vec<Rational> = p_poly.iter().map(|c| *c / q_lc).collect();
+    let q_monic: Vec<Rational> = q_poly.iter().map(|c| *c / q_lc).collect();
+
+    let (quo, rem) = poly_div_rem_rat(&p_norm, &q_monic);
+
+    let mut q_work = q_monic.clone();
+    let mut root_mults: Vec<(Rational, usize)> = Vec::new();
+    while q_work.len() > 1 {
+        let mut found_root = None;
+        if eval_poly_rat(&q_work, Rational::zero()).is_zero() {
+            found_root = Some(Rational::zero());
+        } else if let Some(&c0) = q_work.first()
+            && let Some(&cn) = q_work.last()
+        {
+            for p in small_divisors(c0.num.unsigned_abs() * cn.den as u128) {
+                for q in small_divisors(cn.num.unsigned_abs() * c0.den as u128) {
+                    if let Ok(cand) = Rational::new(p, q) {
+                        if eval_poly_rat(&q_work, cand).is_zero() {
+                            found_root = Some(cand);
+                            break;
+                        }
+                        if eval_poly_rat(&q_work, -cand).is_zero() {
+                            found_root = Some(-cand);
+                            break;
+                        }
+                    }
+                }
+                if found_root.is_some() {
+                    break;
+                }
+            }
+        }
+        if let Some(r) = found_root {
+            let mut mult = 0usize;
+            while eval_poly_rat(&q_work, r).is_zero() && q_work.len() > 1 {
+                q_work = divide_poly_linear(&q_work, r);
+                mult += 1;
+            }
+            root_mults.push((r, mult));
+        } else {
+            break;
+        }
+    }
+
+    if q_work.len() > 1 && q_work.len() != 3 {
+        bail!("denominator does not factor cleanly into linear/quadratic factors over Q");
+    }
+
+    let n = q_monic.len() - 1;
+    let mut cols: Vec<Vec<Rational>> = Vec::with_capacity(n);
+    let mut denom_specs: Vec<(Option<Rational>, usize)> = Vec::with_capacity(n);
+
+    for &(r, mult) in &root_mults {
+        for k in 1..=mult {
+            let mut factor = vec![Rational::one()];
+            for _ in 0..k {
+                factor = poly_mul_rat(&factor, &[-r, Rational::one()]);
+            }
+            let (basis, _) = poly_div_rem_rat(&q_monic, &factor);
+            cols.push(basis);
+            denom_specs.push((Some(r), k));
+        }
+    }
+    if q_work.len() == 3 {
+        let (basis0, _) = poly_div_rem_rat(&q_monic, &q_work);
+        let basis1 = poly_mul_rat(&basis0, &[Rational::zero(), Rational::one()]);
+        cols.push(basis0);
+        denom_specs.push((None, 0));
+        cols.push(basis1);
+        denom_specs.push((None, 1));
+    }
+
+    if cols.len() != n {
+        bail!("unable to assemble partial fraction basis");
+    }
+
+    let mut aug = vec![vec![Rational::zero(); n + 1]; n];
+    for (row, r_val) in rem.iter().enumerate().take(n) {
+        aug[row][n] = *r_val;
+    }
+    for (col_idx, basis) in cols.iter().enumerate() {
+        for (row, &val) in basis.iter().enumerate().take(n) {
+            aug[row][col_idx] = val;
+        }
+    }
+
+    for piv in 0..n {
+        let Some(swap_row) = (piv..n).find(|&r| !aug[r][piv].is_zero()) else {
+            bail!("singular partial fraction linear system");
+        };
+        aug.swap(piv, swap_row);
+        let diag = aug[piv][piv];
+        for cell in &mut aug[piv][piv..=n] {
+            *cell = *cell / diag;
+        }
+        let piv_tail = aug[piv][piv..=n].to_vec();
+        for (r, row) in aug.iter_mut().enumerate().take(n) {
+            if r != piv && !row[piv].is_zero() {
+                let factor = row[piv];
+                for (cell, &pcell) in row[piv..=n].iter_mut().zip(&piv_tail) {
+                    *cell = *cell - factor * pcell;
+                }
+            }
+        }
+    }
+
+    let mut total = poly_to_expr(&quo, var);
+    let x_sym = Expr::Symbol(var.to_string());
+    let mut i = 0;
+    while i < denom_specs.len() {
+        let coeff = aug[i][n];
+        match denom_specs[i] {
+            (Some(r), k) => {
+                if !coeff.is_zero() {
+                    let base = simplify(&Expr::Sub(
+                        Box::new(x_sym.clone()),
+                        Box::new(Expr::Rational(r)),
+                    ));
+                    let denom = if k == 1 {
+                        base
+                    } else {
+                        Expr::Pow(
+                            Box::new(base),
+                            Box::new(Expr::Rational(Rational::from_int(k as i128))),
+                        )
+                    };
+                    let term =
+                        simplify(&Expr::Div(Box::new(Expr::Rational(coeff)), Box::new(denom)));
+                    total = Expr::Add(Box::new(total), Box::new(term));
+                }
+                i += 1;
+            }
+            (None, 0) => {
+                let c0 = coeff;
+                let c1 = aug[i + 1][n];
+                if !c0.is_zero() || !c1.is_zero() {
+                    let lin = poly_to_expr(&[c0, c1], var);
+                    let quad = poly_to_expr(&q_work, var);
+                    total = Expr::Add(
+                        Box::new(total),
+                        Box::new(Expr::Div(Box::new(lin), Box::new(quad))),
+                    );
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(simplify(&total))
+}
+
+/// Evaluate finite integer or symbolic Faulhaber power summations `sum(f, k = a..b)`.
+pub fn summation(expr: &Expr, var: &str, lo: &Expr, hi: &Expr) -> Result<Expr> {
+    if let (Expr::Rational(a), Expr::Rational(b)) = (lo, hi)
+        && a.is_integer()
+        && b.is_integer()
+    {
+        let start = a.num;
+        let end = b.num;
+        if end < start {
+            return Ok(Expr::Rational(Rational::zero()));
+        }
+        if end - start <= 10_000 {
+            let mut acc = Expr::Rational(Rational::zero());
+            for k in start..=end {
+                let term = subs(var, &Expr::Rational(Rational::from_int(k)), expr);
+                acc = Expr::Add(Box::new(acc), Box::new(term));
+            }
+            return Ok(simplify(&acc));
+        }
+    }
+
+    if let Expr::Rational(a) = lo
+        && a.is_integer()
+        && (a.num == 0 || a.num == 1)
+    {
+        let expanded = expand(expr);
+        if let Some(poly) = extract_poly(&expanded, var)
+            && poly.len() <= 5
+        {
+            let n = hi.clone();
+            let n1 = Expr::Add(
+                Box::new(n.clone()),
+                Box::new(Expr::Rational(Rational::one())),
+            );
+            let pow_sum = |deg: usize| -> Expr {
+                match deg {
+                    0 => {
+                        if a.num == 0 {
+                            n1.clone()
+                        } else {
+                            n.clone()
+                        }
+                    }
+                    1 => Expr::Div(
+                        Box::new(Expr::Mul(Box::new(n.clone()), Box::new(n1.clone()))),
+                        Box::new(Expr::Rational(Rational::from_int(2))),
+                    ),
+                    2 => Expr::Div(
+                        Box::new(Expr::Mul(
+                            Box::new(n.clone()),
+                            Box::new(Expr::Mul(
+                                Box::new(n1.clone()),
+                                Box::new(Expr::Add(
+                                    Box::new(Expr::Mul(
+                                        Box::new(Expr::Rational(Rational::from_int(2))),
+                                        Box::new(n.clone()),
+                                    )),
+                                    Box::new(Expr::Rational(Rational::one())),
+                                )),
+                            )),
+                        )),
+                        Box::new(Expr::Rational(Rational::from_int(6))),
+                    ),
+                    3 => Expr::Div(
+                        Box::new(Expr::Mul(
+                            Box::new(Expr::Pow(
+                                Box::new(n.clone()),
+                                Box::new(Expr::Rational(Rational::from_int(2))),
+                            )),
+                            Box::new(Expr::Pow(
+                                Box::new(n1.clone()),
+                                Box::new(Expr::Rational(Rational::from_int(2))),
+                            )),
+                        )),
+                        Box::new(Expr::Rational(Rational::from_int(4))),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+
+            let mut acc = Expr::Rational(Rational::zero());
+            for (deg, &coeff) in poly.iter().enumerate() {
+                if !coeff.is_zero() {
+                    if deg >= 4 {
+                        bail!("symbolic summation supports degree up to 3");
+                    }
+                    acc = Expr::Add(
+                        Box::new(acc),
+                        Box::new(Expr::Mul(
+                            Box::new(Expr::Rational(coeff)),
+                            Box::new(pow_sum(deg)),
+                        )),
+                    );
+                }
+            }
+            return Ok(expand(&simplify(&acc)));
+        }
+    }
+
+    bail!("unable to evaluate summation `sum({expr}, {var} = {lo}..{hi})`")
 }

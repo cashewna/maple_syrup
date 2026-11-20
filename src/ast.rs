@@ -1,6 +1,54 @@
 use crate::rational::Rational;
 use std::fmt;
 
+/// Relational comparison operator for Maple inequalities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl RelOp {
+    /// Flip inequality direction (e.g. when multiplying or dividing by a negative value).
+    pub fn flip(self) -> Self {
+        match self {
+            Self::Lt => Self::Gt,
+            Self::Le => Self::Ge,
+            Self::Gt => Self::Lt,
+            Self::Ge => Self::Le,
+        }
+    }
+
+    pub fn ascii(self) -> &'static str {
+        match self {
+            Self::Lt => " < ",
+            Self::Le => " <= ",
+            Self::Gt => " > ",
+            Self::Ge => " >= ",
+        }
+    }
+
+    pub fn pretty(self) -> &'static str {
+        match self {
+            Self::Lt => " < ",
+            Self::Le => " ≤ ",
+            Self::Gt => " > ",
+            Self::Ge => " ≥ ",
+        }
+    }
+
+    pub fn latex(self) -> &'static str {
+        match self {
+            Self::Lt => " < ",
+            Self::Le => r" \le ",
+            Self::Gt => " > ",
+            Self::Ge => r" \ge ",
+        }
+    }
+}
+
 /// Symbolic abstract syntax tree node.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
@@ -15,6 +63,7 @@ pub enum Expr {
     Pow(Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
     Equation(Box<Expr>, Box<Expr>),
+    Inequality(RelOp, Box<Expr>, Box<Expr>),
     Range(Box<Expr>, Box<Expr>),
     List(Vec<Expr>),
     Matrix(Vec<Vec<Expr>>),
@@ -302,6 +351,19 @@ fn fmt_expr(
             }
             fmt_expr(lhs, f, Prec::AssignEq, false)?;
             write!(f, " = ")?;
+            fmt_expr(rhs, f, Prec::AssignEq, true)?;
+            if needs_parens {
+                write!(f, ")")?;
+            }
+            Ok(())
+        }
+        Expr::Inequality(op, lhs, rhs) => {
+            let needs_parens = parent_prec > Prec::AssignEq;
+            if needs_parens {
+                write!(f, "(")?;
+            }
+            fmt_expr(lhs, f, Prec::AssignEq, false)?;
+            write!(f, "{}", op.ascii())?;
             fmt_expr(rhs, f, Prec::AssignEq, true)?;
             if needs_parens {
                 write!(f, ")")?;
@@ -615,6 +677,11 @@ fn fmt_pretty(expr: &Expr, out: &mut String, parent_prec: Prec, is_rhs: bool) {
             out.push_str(" = ");
             fmt_pretty(rhs, out, Prec::AssignEq, true);
         }
+        Expr::Inequality(op, lhs, rhs) => {
+            fmt_pretty(lhs, out, Prec::AssignEq, false);
+            out.push_str(op.pretty());
+            fmt_pretty(rhs, out, Prec::AssignEq, true);
+        }
         Expr::Range(lhs, rhs) => {
             fmt_pretty(lhs, out, Prec::AssignEq, false);
             out.push_str("..");
@@ -829,6 +896,11 @@ fn fmt_latex(expr: &Expr, out: &mut String, parent_prec: Prec, is_rhs: bool) {
         Expr::Equation(lhs, rhs) => {
             fmt_latex(lhs, out, Prec::AssignEq, false);
             out.push_str(" = ");
+            fmt_latex(rhs, out, Prec::AssignEq, true);
+        }
+        Expr::Inequality(op, lhs, rhs) => {
+            fmt_latex(lhs, out, Prec::AssignEq, false);
+            out.push_str(op.latex());
             fmt_latex(rhs, out, Prec::AssignEq, true);
         }
         Expr::Range(lhs, rhs) => {
