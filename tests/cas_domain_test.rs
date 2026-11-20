@@ -1,4 +1,4 @@
-use maple_gpui::ast::Expr;
+use maple_gpui::ast::{Expr, to_latex};
 use maple_gpui::env::{Environment, EvalOutput};
 use maple_gpui::parser::parse_expr;
 use maple_gpui::rational::Rational;
@@ -309,4 +309,48 @@ fn worksheet_cell_context_actions_match_output_kind() {
 
     let sup_cell = ws.evaluate("z := 1:").pop().unwrap();
     assert!(sup_cell.context_actions().is_empty());
+}
+
+#[test]
+fn worksheet_cell_tracks_assignment_pretty_math_and_preview_plot() {
+    let mut ws = Worksheet::new();
+    let cell = ws.evaluate("f := x^3*sin(x);").pop().unwrap();
+
+    assert_eq!(cell.assigned_name.as_deref(), Some("f"));
+    assert!(cell.result_expr.is_some());
+    assert_eq!(cell.formatted_output(), "f := x³ sin(x)");
+    assert!(
+        cell.preview_plot.is_some(),
+        "univariate expression in x should generate a Context Panel preview plot"
+    );
+}
+
+#[test]
+fn ast_exports_latex_for_fractions_powers_and_matrices() {
+    let expr = parse_expr("2*x/(x^2 + 1)").unwrap();
+    assert_eq!(to_latex(&expr, None), r"\frac{2 x}{x^{2} + 1}");
+
+    let assigned = parse_expr("x^3 * sin(x)").unwrap();
+    assert_eq!(to_latex(&assigned, Some("f")), r"f := x^{3} \sin(x)");
+}
+
+#[test]
+fn worksheet_supports_clear_outputs_and_delete_cell_renumbering() {
+    let mut ws = Worksheet::new();
+    ws.evaluate("a := 10;");
+    ws.evaluate("b := 20;");
+    ws.evaluate("a + b;");
+    assert_eq!(ws.cells.len(), 3);
+
+    ws.delete_cell(1);
+    assert_eq!(ws.cells.len(), 2);
+    assert_eq!(ws.cells[0].index, 1);
+    assert_eq!(ws.cells[1].index, 2);
+    assert_eq!(ws.cells[1].input, "a + b;");
+
+    ws.clear_outputs();
+    assert_eq!(ws.cells.len(), 2);
+    assert_eq!(ws.cells[0].output, CellOutput::Suppressed);
+    assert_eq!(ws.cells[1].output, CellOutput::Suppressed);
+    assert!(ws.cells[0].result_expr.is_none());
 }

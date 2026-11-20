@@ -348,3 +348,518 @@ impl fmt::Display for Expr {
         fmt_expr(self, f, Prec::Lowest, false)
     }
 }
+
+/// Format an expression in Maple-style 2D Unicode math notation (`f := x³ sin(x)`).
+pub fn format_pretty_math(expr: &Expr, assigned_name: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(name) = assigned_name {
+        out.push_str(name);
+        out.push_str(" := ");
+    }
+    fmt_pretty(expr, &mut out, Prec::Lowest, false);
+    out
+}
+
+/// Render an expression to LaTeX (`\frac{...}{...}`, `\sqrt{...}`, matrices).
+pub fn to_latex(expr: &Expr, assigned_name: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(name) = assigned_name {
+        out.push_str(name);
+        out.push_str(" := ");
+    }
+    fmt_latex(expr, &mut out, Prec::Lowest, false);
+    out
+}
+
+fn pretty_symbol(sym: &str) -> &str {
+    match sym {
+        "Pi" | "pi" => "π",
+        "infinity" => "∞",
+        "alpha" => "α",
+        "beta" => "β",
+        "gamma" => "γ",
+        "theta" => "θ",
+        "lambda" => "λ",
+        "sigma" => "σ",
+        "omega" => "ω",
+        _ => sym,
+    }
+}
+
+fn to_superscript_int(mut n: i128) -> Option<String> {
+    if n.unsigned_abs() > 999_999 {
+        return None;
+    }
+    let mut out = String::new();
+    if n < 0 {
+        out.push('⁻');
+        n = -n;
+    }
+    for ch in n.to_string().chars() {
+        let sup = match ch {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            _ => return None,
+        };
+        out.push(sup);
+    }
+    Some(out)
+}
+
+fn fmt_pretty(expr: &Expr, out: &mut String, parent_prec: Prec, is_rhs: bool) {
+    use std::fmt::Write;
+    match expr {
+        Expr::Rational(r) => {
+            let needs_parens = parent_prec > Prec::Atom
+                || (r.is_negative() && parent_prec >= Prec::Pow && !is_rhs)
+                || (!r.is_integer() && parent_prec >= Prec::Pow);
+            if needs_parens {
+                let _ = write!(out, "({r})");
+            } else {
+                let _ = write!(out, "{r}");
+            }
+        }
+        Expr::Float(v) => {
+            let s = format_float(*v);
+            if *v < 0.0 && parent_prec >= Prec::Pow && !is_rhs {
+                let _ = write!(out, "({s})");
+            } else {
+                out.push_str(&s);
+            }
+        }
+        Expr::Symbol(s) => out.push_str(pretty_symbol(s)),
+        Expr::UnaryNeg(inner) => {
+            let needs_parens = parent_prec > Prec::Unary || (parent_prec == Prec::Pow && !is_rhs);
+            if needs_parens {
+                out.push_str("(-");
+                fmt_pretty(inner, out, Prec::Unary, false);
+                out.push(')');
+            } else {
+                out.push('-');
+                fmt_pretty(inner, out, Prec::Unary, false);
+            }
+        }
+        Expr::Add(_, _) | Expr::Sub(_, _) => {
+            let needs_parens =
+                parent_prec > Prec::AddSub || (parent_prec == Prec::AddSub && is_rhs);
+            if needs_parens {
+                out.push('(');
+            }
+            let mut terms = Vec::new();
+            flatten_add(expr, &mut terms, false);
+            for (i, (neg, term)) in terms.into_iter().enumerate() {
+                if i == 0 {
+                    if neg {
+                        out.push('-');
+                        fmt_pretty(term, out, Prec::Unary, false);
+                    } else {
+                        fmt_pretty(term, out, Prec::AddSub, false);
+                    }
+                } else if !neg {
+                    if let Some(pos) = extract_negated(term) {
+                        out.push_str(" - ");
+                        fmt_pretty(&pos, out, Prec::AddSub, true);
+                    } else {
+                        out.push_str(" + ");
+                        fmt_pretty(term, out, Prec::AddSub, false);
+                    }
+                } else if let Some(pos) = extract_negated(term) {
+                    out.push_str(" + ");
+                    fmt_pretty(&pos, out, Prec::AddSub, false);
+                } else {
+                    out.push_str(" - ");
+                    fmt_pretty(term, out, Prec::AddSub, true);
+                }
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Mul(lhs, rhs) => {
+            let needs_parens = parent_prec > Prec::MulDiv;
+            if needs_parens {
+                out.push('(');
+            }
+            if let Expr::Rational(r) = lhs.as_ref()
+                && r.is_neg_one()
+            {
+                out.push('-');
+                fmt_pretty(rhs, out, Prec::Unary, false);
+            } else {
+                fmt_pretty(lhs, out, Prec::MulDiv, false);
+                if matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_)) {
+                    out.push('·');
+                } else {
+                    out.push(' ');
+                }
+                fmt_pretty(rhs, out, Prec::MulDiv, true);
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Div(lhs, rhs) => {
+            let needs_parens = parent_prec > Prec::MulDiv;
+            if needs_parens {
+                out.push('(');
+            }
+            fmt_pretty(lhs, out, Prec::MulDiv, false);
+            out.push('/');
+            let rhs_needs = matches!(
+                rhs.as_ref(),
+                Expr::Add(_, _)
+                    | Expr::Sub(_, _)
+                    | Expr::Mul(_, _)
+                    | Expr::Div(_, _)
+                    | Expr::UnaryNeg(_)
+            ) || matches!(rhs.as_ref(), Expr::Rational(r) if !r.is_integer() || r.is_negative());
+            if rhs_needs {
+                out.push('(');
+                fmt_pretty(rhs, out, Prec::Lowest, false);
+                out.push(')');
+            } else {
+                fmt_pretty(rhs, out, Prec::Pow, true);
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Pow(base, exp) => {
+            let needs_parens = parent_prec > Prec::Pow || (parent_prec == Prec::Pow && !is_rhs);
+            if needs_parens {
+                out.push('(');
+            }
+            fmt_pretty(base, out, Prec::Pow, false);
+            if let Expr::Rational(r) = exp.as_ref()
+                && r.is_integer()
+                && let Some(sup) = to_superscript_int(r.num)
+            {
+                out.push_str(&sup);
+            } else {
+                out.push('^');
+                let exp_needs = matches!(
+                    exp.as_ref(),
+                    Expr::Add(_, _)
+                        | Expr::Sub(_, _)
+                        | Expr::Mul(_, _)
+                        | Expr::Div(_, _)
+                        | Expr::UnaryNeg(_)
+                ) || matches!(exp.as_ref(), Expr::Rational(r) if !r.is_integer() || r.is_negative());
+                if exp_needs {
+                    out.push('(');
+                    fmt_pretty(exp, out, Prec::Lowest, false);
+                    out.push(')');
+                } else {
+                    fmt_pretty(exp, out, Prec::Pow, true);
+                }
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Call(name, args) => match name.as_str() {
+            "sqrt" if args.len() == 1 => {
+                out.push_str("√(");
+                fmt_pretty(&args[0], out, Prec::Lowest, false);
+                out.push(')');
+            }
+            "__arrow__" if args.len() == 2 => {
+                if let Expr::List(params) = &args[0] {
+                    if params.len() == 1 {
+                        fmt_pretty(&params[0], out, Prec::Lowest, false);
+                    } else {
+                        out.push('(');
+                        for (i, p) in params.iter().enumerate() {
+                            if i > 0 {
+                                out.push_str(", ");
+                            }
+                            fmt_pretty(p, out, Prec::Lowest, false);
+                        }
+                        out.push(')');
+                    }
+                    out.push_str(" -> ");
+                    fmt_pretty(&args[1], out, Prec::Lowest, false);
+                } else {
+                    let _ = write!(out, "{name}(");
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        fmt_pretty(a, out, Prec::Lowest, false);
+                    }
+                    out.push(')');
+                }
+            }
+            _ => {
+                out.push_str(name);
+                out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    fmt_pretty(a, out, Prec::Lowest, false);
+                }
+                out.push(')');
+            }
+        },
+        Expr::Equation(lhs, rhs) => {
+            fmt_pretty(lhs, out, Prec::AssignEq, false);
+            out.push_str(" = ");
+            fmt_pretty(rhs, out, Prec::AssignEq, true);
+        }
+        Expr::Range(lhs, rhs) => {
+            fmt_pretty(lhs, out, Prec::AssignEq, false);
+            out.push_str("..");
+            fmt_pretty(rhs, out, Prec::AssignEq, true);
+        }
+        Expr::List(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                fmt_pretty(item, out, Prec::Lowest, false);
+            }
+            out.push(']');
+        }
+        Expr::Matrix(rows) => {
+            out.push('[');
+            for (r_idx, row) in rows.iter().enumerate() {
+                if r_idx > 0 {
+                    out.push_str("; ");
+                }
+                for (c_idx, cell) in row.iter().enumerate() {
+                    if c_idx > 0 {
+                        out.push_str(", ");
+                    }
+                    fmt_pretty(cell, out, Prec::Lowest, false);
+                }
+            }
+            out.push(']');
+        }
+    }
+}
+
+fn latex_symbol(sym: &str) -> &str {
+    match sym {
+        "Pi" | "pi" => r"\pi",
+        "infinity" => r"\infty",
+        "alpha" => r"\alpha",
+        "beta" => r"\beta",
+        "gamma" => r"\gamma",
+        "theta" => r"\theta",
+        "lambda" => r"\lambda",
+        "sigma" => r"\sigma",
+        "omega" => r"\omega",
+        _ => sym,
+    }
+}
+
+fn fmt_latex(expr: &Expr, out: &mut String, parent_prec: Prec, is_rhs: bool) {
+    use std::fmt::Write;
+    match expr {
+        Expr::Rational(r) => {
+            if r.is_integer() {
+                if r.is_negative() && parent_prec >= Prec::Pow && !is_rhs {
+                    let _ = write!(out, "({})", r.num);
+                } else {
+                    let _ = write!(out, "{}", r.num);
+                }
+            } else {
+                let needs_parens = parent_prec >= Prec::Pow;
+                if needs_parens {
+                    out.push_str(r"\left(");
+                }
+                if r.is_negative() {
+                    let _ = write!(out, r"-\frac{{{}}}{{{}}}", r.num.abs(), r.den);
+                } else {
+                    let _ = write!(out, r"\frac{{{}}}{{{}}}", r.num, r.den);
+                }
+                if needs_parens {
+                    out.push_str(r"\right)");
+                }
+            }
+        }
+        Expr::Float(v) => {
+            let s = format_float(*v);
+            if *v < 0.0 && parent_prec >= Prec::Pow && !is_rhs {
+                let _ = write!(out, "({s})");
+            } else {
+                out.push_str(&s);
+            }
+        }
+        Expr::Symbol(s) => out.push_str(latex_symbol(s)),
+        Expr::UnaryNeg(inner) => {
+            let needs_parens = parent_prec > Prec::Unary || (parent_prec == Prec::Pow && !is_rhs);
+            if needs_parens {
+                out.push('(');
+            }
+            out.push('-');
+            fmt_latex(inner, out, Prec::Unary, false);
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Add(_, _) | Expr::Sub(_, _) => {
+            let needs_parens =
+                parent_prec > Prec::AddSub || (parent_prec == Prec::AddSub && is_rhs);
+            if needs_parens {
+                out.push('(');
+            }
+            let mut terms = Vec::new();
+            flatten_add(expr, &mut terms, false);
+            for (i, (neg, term)) in terms.into_iter().enumerate() {
+                if i == 0 {
+                    if neg {
+                        out.push('-');
+                        fmt_latex(term, out, Prec::Unary, false);
+                    } else {
+                        fmt_latex(term, out, Prec::AddSub, false);
+                    }
+                } else if !neg {
+                    if let Some(pos) = extract_negated(term) {
+                        out.push_str(" - ");
+                        fmt_latex(&pos, out, Prec::AddSub, true);
+                    } else {
+                        out.push_str(" + ");
+                        fmt_latex(term, out, Prec::AddSub, false);
+                    }
+                } else if let Some(pos) = extract_negated(term) {
+                    out.push_str(" + ");
+                    fmt_latex(&pos, out, Prec::AddSub, false);
+                } else {
+                    out.push_str(" - ");
+                    fmt_latex(term, out, Prec::AddSub, true);
+                }
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Mul(lhs, rhs) => {
+            let needs_parens = parent_prec > Prec::MulDiv;
+            if needs_parens {
+                out.push('(');
+            }
+            if let Expr::Rational(r) = lhs.as_ref()
+                && r.is_neg_one()
+            {
+                out.push('-');
+                fmt_latex(rhs, out, Prec::Unary, false);
+            } else {
+                fmt_latex(lhs, out, Prec::MulDiv, false);
+                if matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_)) {
+                    out.push_str(r" \cdot ");
+                } else {
+                    out.push(' ');
+                }
+                fmt_latex(rhs, out, Prec::MulDiv, true);
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Div(lhs, rhs) => {
+            out.push_str(r"\frac{");
+            fmt_latex(lhs, out, Prec::Lowest, false);
+            out.push_str("}{");
+            fmt_latex(rhs, out, Prec::Lowest, false);
+            out.push('}');
+        }
+        Expr::Pow(base, exp) => {
+            let needs_parens = parent_prec > Prec::Pow || (parent_prec == Prec::Pow && !is_rhs);
+            if needs_parens {
+                out.push('(');
+            }
+            fmt_latex(base, out, Prec::Pow, false);
+            out.push_str("^{");
+            fmt_latex(exp, out, Prec::Lowest, false);
+            out.push('}');
+            if needs_parens {
+                out.push(')');
+            }
+        }
+        Expr::Call(name, args) => match name.as_str() {
+            "sqrt" if args.len() == 1 => {
+                out.push_str(r"\sqrt{");
+                fmt_latex(&args[0], out, Prec::Lowest, false);
+                out.push('}');
+            }
+            "abs" if args.len() == 1 => {
+                out.push_str(r"\left|");
+                fmt_latex(&args[0], out, Prec::Lowest, false);
+                out.push_str(r"\right|");
+            }
+            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "ln"
+            | "log" | "exp" => {
+                let _ = write!(out, r"\{name}(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    fmt_latex(a, out, Prec::Lowest, false);
+                }
+                out.push(')');
+            }
+            "__arrow__" if args.len() == 2 => {
+                fmt_latex(&args[0], out, Prec::Lowest, false);
+                out.push_str(r" \mapsto ");
+                fmt_latex(&args[1], out, Prec::Lowest, false);
+            }
+            _ => {
+                out.push_str(name);
+                out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    fmt_latex(a, out, Prec::Lowest, false);
+                }
+                out.push(')');
+            }
+        },
+        Expr::Equation(lhs, rhs) => {
+            fmt_latex(lhs, out, Prec::AssignEq, false);
+            out.push_str(" = ");
+            fmt_latex(rhs, out, Prec::AssignEq, true);
+        }
+        Expr::Range(lhs, rhs) => {
+            fmt_latex(lhs, out, Prec::AssignEq, false);
+            out.push_str("..");
+            fmt_latex(rhs, out, Prec::AssignEq, true);
+        }
+        Expr::List(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                fmt_latex(item, out, Prec::Lowest, false);
+            }
+            out.push(']');
+        }
+        Expr::Matrix(rows) => {
+            out.push_str(r"\begin{bmatrix} ");
+            for (r_idx, row) in rows.iter().enumerate() {
+                if r_idx > 0 {
+                    out.push_str(r" \\ ");
+                }
+                for (c_idx, cell) in row.iter().enumerate() {
+                    if c_idx > 0 {
+                        out.push_str(" & ");
+                    }
+                    fmt_latex(cell, out, Prec::Lowest, false);
+                }
+            }
+            out.push_str(r" \end{bmatrix}");
+        }
+    }
+}
