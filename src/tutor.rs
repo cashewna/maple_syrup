@@ -226,19 +226,19 @@ const PRECALC_CH1_PROBLEMS: [StudyGuideProblem; 10] = [
 const CALC_PROBLEMS: [StudyGuideProblem; 4] = [
     StudyGuideProblem {
         number: 1,
-        prompt_text: "d/dx (x^3 * sin(x))",
+        prompt_text: "diff(x^3*sin(x), x)",
         maple_cmd: "diff(x^3*sin(x), x);",
         hint: "Product rule + power & trig derivatives.",
     },
     StudyGuideProblem {
         number: 2,
-        prompt_text: "∫_0^Pi sin(x) dx",
+        prompt_text: "int(sin(x), x = 0..Pi)",
         maple_cmd: "int(sin(x), x = 0..Pi);",
         hint: "Fundamental Theorem of Calculus with F(x) = -cos(x).",
     },
     StudyGuideProblem {
         number: 3,
-        prompt_text: "lim_{x->0} sin(x)/x",
+        prompt_text: "limit(sin(x)/x, x = 0)",
         maple_cmd: "limit(sin(x)/x, x = 0);",
         hint: "L'Hopital's rule / squeeze theorem limit.",
     },

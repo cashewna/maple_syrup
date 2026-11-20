@@ -11,6 +11,7 @@ use gpui::{
 };
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 actions!(
     maple_worksheet,
@@ -2798,8 +2799,9 @@ impl MapleWorkspaceView {
                                 .hover(|s| s.bg(rgb(0xeff6ff)))
                                 .cursor_pointer()
                                 .tooltip(make_tooltip(format!("Insert symbol `{sym}`")))
+                                .font_family(math_op_font())
                                 .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(rgb(0x1d4ed8))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.insert_text(sym, cx);
@@ -3691,24 +3693,12 @@ impl MapleWorkspaceView {
                                     )
                                     .child(match math_input_node {
                                         Some(node) => div()
-                                            .flex()
-                                            .flex_row()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_2()
+                                            .id(("cell-src", idx))
+                                            .tooltip(make_tooltip(format!(
+                                                "Maple source: {}",
+                                                cell.input
+                                            )))
                                             .child(node)
-                                            .child(
-                                                div()
-                                                    .px_1p5()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .bg(rgb(0xf8fafc))
-                                                    .border_1()
-                                                    .border_color(rgb(0xe2e8f0))
-                                                    .text_xs()
-                                                    .text_color(rgb(0x64748b))
-                                                    .child(cell.input.clone()),
-                                            )
                                             .into_any_element(),
                                         None => div()
                                             .text_size(px(14.0 * zoom))
@@ -3817,6 +3807,7 @@ impl MapleWorkspaceView {
                                         .w(px(36.))
                                         .flex()
                                         .justify_end()
+                                        .font_family(math_serif_font())
                                         .text_sm()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0x0f172a))
@@ -4555,8 +4546,12 @@ impl MapleWorkspaceView {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1()
-                            .child(math_span(format!("{name} :="), zoom))
+                            .child(math_italic(name.clone(), zoom, rgb(0x1d4ed8)))
+                            .child(div().mx(px(4.5 * zoom)).child(math_op(
+                                ":=",
+                                zoom,
+                                rgb(0x1d4ed8),
+                            )))
                             .child(node)
                             .into_any_element()
                     } else {
@@ -5110,13 +5105,13 @@ impl MapleWorkspaceView {
                                 let cmd = prob.maple_cmd;
                                 let math_title = try_render_2d_statement_or_expr(
                                     prob.prompt_text,
-                                    0.96,
+                                    1.02,
                                     rgb(0x0f172a),
                                 );
                                 let fallback_cmd_math = if math_title.is_none() {
                                     try_render_2d_statement_or_expr(
                                         prob.maple_cmd,
-                                        0.86,
+                                        0.90,
                                         rgb(0x1d4ed8),
                                     )
                                 } else {
@@ -5154,6 +5149,7 @@ impl MapleWorkspaceView {
                                                     .child(
                                                         div()
                                                             .flex_none()
+                                                            .font_family(math_serif_font())
                                                             .text_sm()
                                                             .font_weight(FontWeight::BOLD)
                                                             .text_color(rgb(0x0f172a))
@@ -5396,21 +5392,114 @@ impl MapleWorkspaceView {
     }
 }
 
-fn math_span_colored(
-    text: impl Into<gpui::SharedString>,
-    zoom: f32,
-    color: Rgba,
-) -> gpui::AnyElement {
+static MATH_SERIF_FONT: OnceLock<String> = OnceLock::new();
+static MATH_OP_FONT: OnceLock<String> = OnceLock::new();
+
+const MATH_BASE_PX: f32 = 17.5;
+
+fn init_math_fonts(cx: &App) {
+    let available = cx.text_system().all_font_names();
+    let pick = |candidates: &[&str]| -> Option<String> {
+        for cand in candidates {
+            if let Some(found) = available.iter().find(|f| f.eq_ignore_ascii_case(cand)) {
+                return Some(found.clone());
+            }
+        }
+        None
+    };
+    let serif = pick(&[
+        "TeX Gyre Termes",
+        "STIX Two Text",
+        "Latin Modern Roman",
+        "CMU Serif",
+        "TeX Gyre Pagella",
+        "Libertinus Serif",
+        "DejaVu Math TeX Gyre",
+        "Times New Roman",
+        "Liberation Serif",
+        "DejaVu Serif",
+        "Noto Serif",
+    ])
+    .unwrap_or_else(|| ".SystemUIFont".to_string());
+    let op = pick(&[
+        "DejaVu Math TeX Gyre",
+        "TeX Gyre Termes Math",
+        "Latin Modern Math",
+        "STIX Two Math",
+        "Cambria Math",
+        "TeX Gyre Termes",
+        "DejaVu Serif",
+    ])
+    .unwrap_or_else(|| serif.clone());
+    let _ = MATH_SERIF_FONT.set(serif);
+    let _ = MATH_OP_FONT.set(op);
+}
+
+fn math_serif_font() -> &'static str {
+    MATH_SERIF_FONT
+        .get()
+        .map(String::as_str)
+        .unwrap_or("TeX Gyre Termes")
+}
+
+fn math_op_font() -> &'static str {
+    MATH_OP_FONT
+        .get()
+        .map(String::as_str)
+        .unwrap_or("DejaVu Math TeX Gyre")
+}
+
+fn math_roman(text: impl Into<gpui::SharedString>, zoom: f32, color: Rgba) -> gpui::AnyElement {
     div()
-        .text_size(px(16.0 * zoom))
-        .font_weight(FontWeight::MEDIUM)
+        .font_family(math_serif_font())
+        .not_italic()
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(MATH_BASE_PX * zoom))
+        .line_height(px(MATH_BASE_PX * 1.06 * zoom))
+        .text_color(color)
+        .child(text.into())
+        .into_any_element()
+}
+
+fn math_italic(text: impl Into<gpui::SharedString>, zoom: f32, color: Rgba) -> gpui::AnyElement {
+    div()
+        .font_family(math_serif_font())
+        .italic()
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(MATH_BASE_PX * zoom))
+        .line_height(px(MATH_BASE_PX * 1.06 * zoom))
+        .pr(px(0.8 * zoom))
+        .text_color(color)
+        .child(text.into())
+        .into_any_element()
+}
+
+fn math_op(text: impl Into<gpui::SharedString>, zoom: f32, color: Rgba) -> gpui::AnyElement {
+    div()
+        .font_family(math_op_font())
+        .not_italic()
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(16.5 * zoom))
+        .line_height(px(17.5 * zoom))
+        .text_color(color)
+        .child(text.into())
+        .into_any_element()
+}
+
+fn math_big_op(text: impl Into<gpui::SharedString>, size_px: f32, color: Rgba) -> gpui::AnyElement {
+    div()
+        .font_family(math_op_font())
+        .not_italic()
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(size_px))
+        .line_height(px(size_px * 0.96))
         .text_color(color)
         .child(text.into())
         .into_any_element()
 }
 
 fn math_span(text: impl Into<gpui::SharedString>, zoom: f32) -> gpui::AnyElement {
-    math_span_colored(text, zoom, rgb(0x1d4ed8))
+    math_roman(text, zoom, rgb(0x1d4ed8))
 }
 
 fn map_math_symbol(sym: &str) -> &str {
@@ -5420,40 +5509,263 @@ fn map_math_symbol(sym: &str) -> &str {
         "alpha" => "α",
         "beta" => "β",
         "gamma" => "γ",
+        "delta" => "δ",
+        "epsilon" => "ε",
         "theta" => "θ",
         "lambda" => "λ",
+        "mu" => "μ",
         "sigma" => "σ",
+        "phi" => "φ",
+        "psi" => "ψ",
         "omega" => "ω",
         _ => sym,
     }
 }
 
-fn wrap_parens_colored(inner: gpui::AnyElement, zoom: f32, color: Rgba) -> gpui::AnyElement {
+fn is_upright_math_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "sin"
+            | "cos"
+            | "tan"
+            | "csc"
+            | "sec"
+            | "cot"
+            | "arcsin"
+            | "arccos"
+            | "arctan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "ln"
+            | "log"
+            | "exp"
+            | "lim"
+            | "det"
+            | "trace"
+            | "Re"
+            | "Im"
+            | "gcd"
+            | "lcm"
+            | "mod"
+            | "solve"
+            | "dsolve"
+            | "rref"
+            | "simplify"
+            | "expand"
+            | "factor"
+            | "subs"
+            | "convert"
+            | "series"
+            | "plot"
+            | "plot3d"
+            | "Matrix"
+            | "Eigenvalues"
+            | "Eigenvectors"
+            | "NullSpace"
+            | "Rank"
+            | "Transpose"
+            | "Inverse"
+            | "diff"
+            | "int"
+            | "integrate"
+            | "sum"
+            | "Sum"
+            | "limit"
+            | "evalf"
+    )
+}
+
+fn extract_matrix_call_rows(args: &[Expr]) -> Option<Vec<Vec<Expr>>> {
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::List(rows) = &args[0] else {
+        return None;
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    let mut expected_cols = None;
+    for row in rows {
+        let Expr::List(cells) = row else {
+            return None;
+        };
+        if cells.is_empty() {
+            return None;
+        }
+        match expected_cols {
+            None => expected_cols = Some(cells.len()),
+            Some(c) if c != cells.len() => return None,
+            Some(_) => {}
+        }
+        out.push(cells.clone());
+    }
+    Some(out)
+}
+
+fn expr_is_tall(expr: &Expr) -> bool {
+    match expr {
+        Expr::Rational(r) => !r.is_integer(),
+        Expr::Div(_, _) | Expr::Matrix(_) => true,
+        Expr::UnaryNeg(inner) => expr_is_tall(inner),
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Equation(a, b)
+        | Expr::Inequality(_, a, b) => expr_is_tall(a) || expr_is_tall(b),
+        Expr::Pow(base, _) => expr_is_tall(base),
+        Expr::Call(name, args) => match name.as_str() {
+            "int" | "integrate" | "diff" | "sum" | "Sum" | "limit" => true,
+            "Matrix" => extract_matrix_call_rows(args).is_some(),
+            _ => args.iter().any(expr_is_tall),
+        },
+        Expr::Float(_) | Expr::Symbol(_) | Expr::Range(_, _) | Expr::List(_) => false,
+    }
+}
+
+fn wrap_parens_colored(
+    inner: gpui::AnyElement,
+    tall: bool,
+    zoom: f32,
+    color: Rgba,
+) -> gpui::AnyElement {
+    let (l, r) = if tall {
+        (
+            math_op("(", zoom * 1.38, color),
+            math_op(")", zoom * 1.38, color),
+        )
+    } else {
+        (math_roman("(", zoom, color), math_roman(")", zoom, color))
+    };
     div()
         .flex()
         .flex_row()
         .items_center()
-        .child(math_span_colored("(", zoom, color))
+        .child(l)
         .child(inner)
-        .child(math_span_colored(")", zoom, color))
+        .child(r)
         .into_any_element()
 }
 
 fn render_stacked_fraction_colored(
     num: gpui::AnyElement,
     den: gpui::AnyElement,
+    zoom: f32,
     color: Rgba,
 ) -> gpui::AnyElement {
     div()
-        .px_1()
+        .mx(px(1.5 * zoom))
+        .px(px(1.5 * zoom))
         .flex()
         .flex_col()
         .items_center()
-        .gap_0p5()
-        .child(num)
-        .child(div().w_full().min_w(px(14.)).h(px(1.5)).bg(color))
-        .child(den)
+        .child(div().pb(px(1.0 * zoom)).child(num))
+        .child(div().w_full().min_w(px(11.0 * zoom)).h(px(1.0)).bg(color))
+        .child(div().pt(px(1.5 * zoom)).child(den))
         .into_any_element()
+}
+
+fn render_2d_matrix_colored(rows: &[Vec<Expr>], zoom: f32, color: Rgba) -> gpui::AnyElement {
+    div()
+        .mx(px(2.0 * zoom))
+        .flex()
+        .flex_row()
+        .child(
+            div()
+                .w(px(5.0 * zoom))
+                .border_l_1()
+                .border_t_1()
+                .border_b_1()
+                .border_color(color),
+        )
+        .child(
+            div()
+                .px(px(6.0 * zoom))
+                .py(px(3.0 * zoom))
+                .flex()
+                .flex_col()
+                .gap(px(4.0 * zoom))
+                .children(rows.iter().map(|row| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(14.0 * zoom))
+                        .children(row.iter().map(|cell| {
+                            div()
+                                .min_w(px(26.0 * zoom))
+                                .flex()
+                                .justify_center()
+                                .items_center()
+                                .child(render_2d_math_node_colored(
+                                    cell,
+                                    0,
+                                    false,
+                                    zoom * 0.92,
+                                    color,
+                                ))
+                        }))
+                })),
+        )
+        .child(
+            div()
+                .w(px(5.0 * zoom))
+                .border_r_1()
+                .border_t_1()
+                .border_b_1()
+                .border_color(color),
+        )
+        .into_any_element()
+}
+
+fn render_2d_symbol_token(s: &str, zoom: f32, color: Rgba) -> gpui::AnyElement {
+    if s == "infinity" {
+        return math_op("∞", zoom, color);
+    }
+    if matches!(s, "true" | "false" | "FAIL" | "undefined") {
+        return math_roman(s.to_string(), zoom, color);
+    }
+    if let Some(sub) = s.strip_prefix("_C")
+        && !sub.is_empty()
+        && sub.chars().all(|c| c.is_ascii_digit())
+    {
+        return div()
+            .flex()
+            .flex_row()
+            .items_end()
+            .child(
+                div()
+                    .mb(px(2.5 * zoom))
+                    .child(math_italic("C", zoom, color)),
+            )
+            .child(math_roman(sub.to_string(), zoom * 0.70, color))
+            .into_any_element();
+    }
+    if let Some((base, sub)) = s.split_once('_')
+        && !base.is_empty()
+        && !sub.is_empty()
+        && !sub.contains('_')
+    {
+        let sub_node = if sub.chars().all(|c| c.is_ascii_digit()) {
+            math_roman(sub.to_string(), zoom * 0.70, color)
+        } else {
+            math_italic(map_math_symbol(sub).to_string(), zoom * 0.70, color)
+        };
+        return div()
+            .flex()
+            .flex_row()
+            .items_end()
+            .child(div().mb(px(2.5 * zoom)).child(math_italic(
+                map_math_symbol(base).to_string(),
+                zoom,
+                color,
+            )))
+            .child(sub_node)
+            .into_any_element();
+    }
+    math_italic(map_math_symbol(s).to_string(), zoom, color)
 }
 
 fn try_render_2d_statement_or_expr(
@@ -5483,28 +5795,41 @@ fn try_render_2d_statement_or_expr(
                 .flex_row()
                 .flex_wrap()
                 .items_center()
-                .gap_1()
-                .child(math_span_colored(format!("{name} :="), zoom, color))
+                .child(math_italic(name.clone(), zoom, color))
+                .child(div().mx(px(4.5 * zoom)).child(math_op(":=", zoom, color)))
                 .child(render_2d_math_node_colored(value, 0, false, zoom, color))
                 .into_any_element(),
         ),
         Statement::FunctionDef {
             name, params, body, ..
-        } => Some(
-            div()
+        } => {
+            let mut param_row = div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
-                .gap_1()
-                .child(math_span_colored(
-                    format!("{name} := ({}) →", params.join(", ")),
-                    zoom,
-                    color,
-                ))
-                .child(render_2d_math_node_colored(body, 0, false, zoom, color))
-                .into_any_element(),
-        ),
+                .child(math_roman("(", zoom, color));
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    param_row = param_row
+                        .child(div().mr(px(3.5 * zoom)).child(math_roman(",", zoom, color)));
+                }
+                param_row = param_row.child(math_italic(p.clone(), zoom, color));
+            }
+            let params_node = param_row.child(math_roman(")", zoom, color));
+            Some(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .child(math_italic(name.clone(), zoom, color))
+                    .child(div().mx(px(4.5 * zoom)).child(math_op(":=", zoom, color)))
+                    .child(params_node)
+                    .child(div().mx(px(4.5 * zoom)).child(math_op("→", zoom, color)))
+                    .child(render_2d_math_node_colored(body, 0, false, zoom, color))
+                    .into_any_element(),
+            )
+        }
         Statement::EvalExpr { expr, .. } => {
             Some(render_2d_math_node_colored(expr, 0, false, zoom, color))
         }
@@ -5526,31 +5851,41 @@ fn render_2d_math_node_colored(
     match expr {
         Expr::Rational(r) => {
             if r.is_integer() {
-                let s = r.num.to_string();
-                let node = math_span_colored(s, zoom, color);
-                if r.is_negative() && parent_prec >= 5 && !is_rhs {
-                    wrap_parens_colored(node, zoom, color)
+                let node = if r.is_negative() {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(math_op("−", zoom, color))
+                        .child(math_roman(r.num.abs().to_string(), zoom, color))
+                        .into_any_element()
+                } else {
+                    math_roman(r.num.to_string(), zoom, color)
+                };
+                if r.is_negative()
+                    && ((parent_prec >= 5 && !is_rhs) || (parent_prec == 3 && is_rhs))
+                {
+                    wrap_parens_colored(node, false, zoom, color)
                 } else {
                     node
                 }
             } else {
-                let num_node = math_span_colored(r.num.abs().to_string(), zoom * 0.88, color);
-                let den_node = math_span_colored(r.den.to_string(), zoom * 0.88, color);
-                let frac = render_stacked_fraction_colored(num_node, den_node, color);
+                let num_node = math_roman(r.num.abs().to_string(), zoom * 0.86, color);
+                let den_node = math_roman(r.den.to_string(), zoom * 0.86, color);
+                let frac = render_stacked_fraction_colored(num_node, den_node, zoom, color);
                 let signed = if r.is_negative() {
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_0p5()
-                        .child(math_span_colored("−", zoom, color))
+                        .child(div().mr(px(1.0 * zoom)).child(math_op("−", zoom, color)))
                         .child(frac)
                         .into_any_element()
                 } else {
                     frac
                 };
                 if parent_prec >= 5 {
-                    wrap_parens_colored(signed, zoom, color)
+                    wrap_parens_colored(signed, true, zoom, color)
                 } else {
                     signed
                 }
@@ -5558,42 +5893,39 @@ fn render_2d_math_node_colored(
         }
         Expr::Float(v) => {
             let clean = if *v == 0.0 { 0.0 } else { *v };
-            let node = math_span_colored(format!("{clean}"), zoom, color);
-            if *v < 0.0 && parent_prec >= 5 && !is_rhs {
-                wrap_parens_colored(node, zoom, color)
+            let node = if clean < 0.0 {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(math_op("−", zoom, color))
+                    .child(math_roman(format!("{}", -clean), zoom, color))
+                    .into_any_element()
+            } else {
+                math_roman(format!("{clean}"), zoom, color)
+            };
+            if clean < 0.0 && ((parent_prec >= 5 && !is_rhs) || (parent_prec == 3 && is_rhs)) {
+                wrap_parens_colored(node, false, zoom, color)
             } else {
                 node
             }
         }
-        Expr::Symbol(s) => {
-            if let Some(sub) = s.strip_prefix("_C")
-                && !sub.is_empty()
-                && sub.chars().all(|c| c.is_ascii_digit())
-            {
-                return div()
-                    .flex()
-                    .flex_row()
-                    .items_end()
-                    .child(math_span_colored("C", zoom, color))
-                    .child(div().mt(px(4.0 * zoom)).child(math_span_colored(
-                        sub.to_string(),
-                        zoom * 0.72,
-                        color,
-                    )))
-                    .into_any_element();
-            }
-            math_span_colored(map_math_symbol(s).to_string(), zoom, color)
-        }
+        Expr::Symbol(s) => render_2d_symbol_token(s, zoom, color),
         Expr::UnaryNeg(inner) => {
+            let tall = expr_is_tall(inner);
+            let mut neg = div().child(math_op("−", zoom, color));
+            if tall {
+                neg = neg.mr(px(1.5 * zoom));
+            }
             let row = div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(math_span_colored("−", zoom, color))
+                .child(neg)
                 .child(render_2d_math_node_colored(inner, 4, false, zoom, color))
                 .into_any_element();
             if parent_prec > 4 || (parent_prec == 5 && !is_rhs) {
-                wrap_parens_colored(row, zoom, color)
+                wrap_parens_colored(row, tall, zoom, color)
             } else {
                 row
             }
@@ -5601,110 +5933,144 @@ fn render_2d_math_node_colored(
         Expr::Add(_, _) | Expr::Sub(_, _) => {
             let mut terms: Vec<(bool, &Expr)> = Vec::new();
             collect_2d_terms(expr, false, &mut terms);
-            let mut row = div().flex().flex_row().flex_wrap().items_center().gap_1();
+            let mut row = div().flex().flex_row().flex_wrap().items_center();
             for (i, (neg, term)) in terms.into_iter().enumerate() {
                 if i == 0 {
                     if neg {
-                        row = row.child(math_span_colored("−", zoom, color));
+                        let mut unary = div().child(math_op("−", zoom, color));
+                        if expr_is_tall(term) {
+                            unary = unary.mr(px(1.5 * zoom));
+                        }
+                        row = row.child(unary);
                     }
                     row = row.child(render_2d_math_node_colored(term, 2, false, zoom, color));
                 } else if !neg {
                     if let Some(pos) = extract_2d_neg(term) {
                         row = row
-                            .child(math_span_colored("−", zoom, color))
+                            .child(div().mx(px(3.5 * zoom)).child(math_op("−", zoom, color)))
                             .child(render_2d_math_node_colored(&pos, 2, true, zoom, color));
                     } else {
                         row = row
-                            .child(math_span_colored("+", zoom, color))
+                            .child(div().mx(px(3.5 * zoom)).child(math_op("+", zoom, color)))
                             .child(render_2d_math_node_colored(term, 2, false, zoom, color));
                     }
                 } else if let Some(pos) = extract_2d_neg(term) {
                     row = row
-                        .child(math_span_colored("+", zoom, color))
+                        .child(div().mx(px(3.5 * zoom)).child(math_op("+", zoom, color)))
                         .child(render_2d_math_node_colored(&pos, 2, false, zoom, color));
                 } else {
                     row = row
-                        .child(math_span_colored("−", zoom, color))
+                        .child(div().mx(px(3.5 * zoom)).child(math_op("−", zoom, color)))
                         .child(render_2d_math_node_colored(term, 2, true, zoom, color));
                 }
             }
             let elem = row.into_any_element();
             if parent_prec > 2 || (parent_prec == 2 && is_rhs) {
-                wrap_parens_colored(elem, zoom, color)
+                wrap_parens_colored(elem, expr_is_tall(expr), zoom, color)
             } else {
                 elem
             }
         }
         Expr::Mul(lhs, rhs) => {
+            let tall_rhs = expr_is_tall(rhs);
             let elem = if let Expr::Rational(r) = lhs.as_ref()
                 && r.is_neg_one()
             {
+                let mut neg = div().child(math_op("−", zoom, color));
+                if tall_rhs {
+                    neg = neg.mr(px(1.5 * zoom));
+                }
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(math_span_colored("−", zoom, color))
+                    .child(neg)
                     .child(render_2d_math_node_colored(rhs, 4, false, zoom, color))
                     .into_any_element()
             } else {
-                let tight_implicit = matches!(lhs.as_ref(), Expr::Rational(_) | Expr::Float(_))
-                    && !matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_));
+                let rhs_is_num = matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_));
+                let lhs_is_num = matches!(lhs.as_ref(), Expr::Rational(_) | Expr::Float(_));
+                let rhs_is_named_call =
+                    matches!(rhs.as_ref(), Expr::Call(n, _) if is_upright_math_fn(n));
+                let gap_px = if rhs_is_num {
+                    0.0
+                } else if lhs_is_num && !expr_is_tall(lhs) && !rhs_is_named_call {
+                    0.5 * zoom
+                } else {
+                    2.5 * zoom
+                };
                 let mut row = div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .when(!tight_implicit, |el| el.gap_1())
                     .child(render_2d_math_node_colored(lhs, 3, false, zoom, color));
-                if matches!(rhs.as_ref(), Expr::Rational(_) | Expr::Float(_)) {
-                    row = row.child(math_span_colored("·", zoom, color));
-                }
-                row.child(render_2d_math_node_colored(rhs, 3, true, zoom, color))
+                if rhs_is_num {
+                    row = row.child(div().mx(px(2.0 * zoom)).child(math_op("·", zoom, color)));
+                    row.child(render_2d_math_node_colored(rhs, 3, true, zoom, color))
+                        .into_any_element()
+                } else {
+                    row.child(
+                        div()
+                            .ml(px(gap_px))
+                            .child(render_2d_math_node_colored(rhs, 3, true, zoom, color)),
+                    )
                     .into_any_element()
+                }
             };
             if parent_prec > 3 {
-                wrap_parens_colored(elem, zoom, color)
+                wrap_parens_colored(elem, expr_is_tall(lhs) || tall_rhs, zoom, color)
             } else {
                 elem
             }
         }
         Expr::Div(lhs, rhs) => {
-            let num_node = render_2d_math_node_colored(lhs, 0, false, zoom * 0.92, color);
-            let den_node = render_2d_math_node_colored(rhs, 0, false, zoom * 0.92, color);
-            let frac = render_stacked_fraction_colored(num_node, den_node, color);
+            let num_node = render_2d_math_node_colored(lhs, 0, false, zoom * 0.88, color);
+            let den_node = render_2d_math_node_colored(rhs, 0, false, zoom * 0.88, color);
+            let frac = render_stacked_fraction_colored(num_node, den_node, zoom, color);
             if parent_prec > 3 {
-                wrap_parens_colored(frac, zoom, color)
+                wrap_parens_colored(frac, true, zoom, color)
             } else {
                 frac
             }
         }
         Expr::Pow(base, exp) => {
+            let tall_base = expr_is_tall(base);
             let base_node = render_2d_math_node_colored(base, 5, false, zoom, color);
-            let exp_node = div().mb(px(8.0 * zoom)).child(render_2d_math_node_colored(
-                exp,
-                0,
-                true,
-                zoom * 0.72,
-                color,
-            ));
-            let pow = div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .child(base_node)
-                .child(exp_node)
-                .into_any_element();
+            let exp_node = render_2d_math_node_colored(exp, 0, true, zoom * 0.72, color);
+            let pow = if tall_base {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .child(base_node)
+                    .child(div().ml(px(1.0 * zoom)).child(exp_node))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .child(base_node)
+                    .child(div().mb(px(6.5 * zoom)).ml(px(0.5 * zoom)).child(exp_node))
+                    .into_any_element()
+            };
             if parent_prec > 5 || (parent_prec == 5 && !is_rhs) {
-                wrap_parens_colored(pow, zoom, color)
+                wrap_parens_colored(pow, tall_base, zoom, color)
             } else {
                 pow
             }
         }
         Expr::Call(name, args) => match name.as_str() {
+            "Matrix" if extract_matrix_call_rows(args).is_some() => {
+                let rows = extract_matrix_call_rows(args).unwrap_or_default();
+                render_2d_matrix_colored(&rows, zoom, color)
+            }
             "abs" if args.len() == 1 => div()
-                .px_1p5()
-                .py_0p5()
-                .border_l_2()
-                .border_r_2()
+                .mx(px(1.0 * zoom))
+                .px(px(3.5 * zoom))
+                .py(px(1.0 * zoom))
+                .border_l_1()
+                .border_r_1()
                 .border_color(color)
                 .flex()
                 .flex_row()
@@ -5721,19 +6087,18 @@ fn render_2d_math_node_colored(
                         .flex_row()
                         .flex_wrap()
                         .items_center()
-                        .gap_1()
                         .child(render_2d_math_node_colored(l1, 1, false, zoom, color))
-                        .child(math_span_colored(
+                        .child(div().mx(px(4.5 * zoom)).child(math_op(
                             op1.pretty().trim().to_string(),
                             zoom,
                             color,
-                        ))
+                        )))
                         .child(render_2d_math_node_colored(r1, 1, false, zoom, color))
-                        .child(math_span_colored(
+                        .child(div().mx(px(4.5 * zoom)).child(math_op(
                             op2.pretty().trim().to_string(),
                             zoom,
                             color,
-                        ))
+                        )))
                         .child(render_2d_math_node_colored(r2, 1, true, zoom, color))
                         .into_any_element();
                 }
@@ -5742,27 +6107,24 @@ fn render_2d_math_node_colored(
                     .flex_row()
                     .flex_wrap()
                     .items_center()
-                    .gap_1p5()
                     .child(render_2d_math_node_colored(&args[0], 0, false, zoom, color))
-                    .child(math_span_colored("∧", zoom * 0.9, color))
+                    .child(
+                        div()
+                            .mx(px(5.0 * zoom))
+                            .child(math_roman("and", zoom * 0.94, color)),
+                    )
                     .child(render_2d_math_node_colored(&args[1], 0, false, zoom, color))
                     .into_any_element()
             }
             "Or" if args.len() >= 2 => {
-                let mut row = div().flex().flex_row().flex_wrap().items_center().gap_2();
+                let mut row = div().flex().flex_row().flex_wrap().items_center();
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
-                        row = row.child(
-                            div()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded_sm()
-                                .bg(rgb(0xeff6ff))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(color)
-                                .child("or"),
-                        );
+                        row = row.child(div().mx(px(6.0 * zoom)).child(math_roman(
+                            "or",
+                            zoom * 0.94,
+                            color,
+                        )));
                     }
                     row = row.child(render_2d_math_node_colored(a, 0, false, zoom, color));
                 }
@@ -5774,21 +6136,21 @@ fn render_2d_math_node_colored(
                         div()
                             .flex()
                             .flex_row()
-                            .items_start()
-                            .child(math_span_colored("d", zoom * 0.86, color))
-                            .child(div().mb(px(5.0 * zoom)).child(render_2d_math_node_colored(
+                            .items_end()
+                            .child(math_roman("d", zoom * 0.86, color))
+                            .child(div().mb(px(4.5 * zoom)).child(render_2d_math_node_colored(
                                 &sargs[1],
                                 0,
                                 true,
-                                zoom * 0.65,
+                                zoom * 0.64,
                                 color,
                             )))
                             .into_any_element(),
                         div()
                             .flex()
                             .flex_row()
-                            .items_start()
-                            .child(math_span_colored("d", zoom * 0.86, color))
+                            .items_end()
+                            .child(math_roman("d", zoom * 0.86, color))
                             .child(render_2d_math_node_colored(
                                 &sargs[0],
                                 5,
@@ -5796,22 +6158,22 @@ fn render_2d_math_node_colored(
                                 zoom * 0.86,
                                 color,
                             ))
-                            .child(div().mb(px(5.0 * zoom)).child(render_2d_math_node_colored(
+                            .child(div().mb(px(4.5 * zoom)).child(render_2d_math_node_colored(
                                 &sargs[1],
                                 0,
                                 true,
-                                zoom * 0.65,
+                                zoom * 0.64,
                                 color,
                             )))
                             .into_any_element(),
                     ),
                     spec => (
-                        math_span_colored("d", zoom * 0.86, color),
+                        math_roman("d", zoom * 0.86, color),
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .child(math_span_colored("d", zoom * 0.86, color))
+                            .child(math_roman("d", zoom * 0.86, color))
                             .child(render_2d_math_node_colored(
                                 spec,
                                 0,
@@ -5826,9 +6188,14 @@ fn render_2d_math_node_colored(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .child(render_stacked_fraction_colored(num_lbl, den_node, color))
-                    .child(render_2d_math_node_colored(&args[0], 4, false, zoom, color))
+                    .child(render_stacked_fraction_colored(
+                        num_lbl, den_node, zoom, color,
+                    ))
+                    .child(
+                        div()
+                            .ml(px(3.0 * zoom))
+                            .child(render_2d_math_node_colored(&args[0], 4, false, zoom, color)),
+                    )
                     .into_any_element()
             }
             "int" | "integrate" if args.len() == 2 => {
@@ -5850,10 +6217,11 @@ fn render_2d_math_node_colored(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_0p5()
-                        .child(math_span_colored("∫", zoom * 1.45, color))
+                        .child(math_big_op("∫", 27.0 * zoom, color))
                         .child(
                             div()
+                                .h(px(27.0 * zoom))
+                                .ml(px(1.0 * zoom))
                                 .flex()
                                 .flex_col()
                                 .justify_between()
@@ -5867,21 +6235,25 @@ fn render_2d_math_node_colored(
                                 )),
                         )
                         .into_any_element(),
-                    None => math_span_colored("∫", zoom * 1.45, color),
+                    None => math_big_op("∫", 27.0 * zoom, color),
                 };
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
                     .child(int_sym)
-                    .child(render_2d_math_node_colored(&args[0], 2, false, zoom, color))
                     .child(
                         div()
+                            .ml(px(3.0 * zoom))
+                            .child(render_2d_math_node_colored(&args[0], 2, false, zoom, color)),
+                    )
+                    .child(
+                        div()
+                            .ml(px(4.5 * zoom))
                             .flex()
                             .flex_row()
                             .items_center()
-                            .child(math_span_colored("d", zoom, color))
+                            .child(math_roman("d", zoom, color))
                             .child(var_node),
                     )
                     .into_any_element()
@@ -5892,9 +6264,12 @@ fn render_2d_math_node_colored(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_0p5()
                         .child(render_2d_math_node_colored(v, 0, false, zoom * 0.68, color))
-                        .child(math_span_colored("→", zoom * 0.68, color))
+                        .child(
+                            div()
+                                .mx(px(1.5 * zoom))
+                                .child(math_op("→", zoom * 0.68, color)),
+                        )
                         .child(render_2d_math_node_colored(
                             pt,
                             0,
@@ -5909,16 +6284,19 @@ fn render_2d_math_node_colored(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1p5()
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .items_center()
-                            .child(math_span_colored("lim", zoom * 0.92, color))
+                            .child(math_roman("lim", zoom * 0.95, color))
                             .child(sub_node),
                     )
-                    .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color))
+                    .child(
+                        div()
+                            .ml(px(4.0 * zoom))
+                            .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color)),
+                    )
                     .into_any_element()
             }
             "sum" | "Sum" if args.len() == 2 => {
@@ -5930,7 +6308,11 @@ fn render_2d_math_node_colored(
                                 .flex_row()
                                 .items_center()
                                 .child(render_2d_math_node_colored(k, 0, false, zoom * 0.65, color))
-                                .child(math_span_colored("=", zoom * 0.65, color))
+                                .child(div().mx(px(1.0 * zoom)).child(math_op(
+                                    "=",
+                                    zoom * 0.65,
+                                    color,
+                                )))
                                 .child(render_2d_math_node_colored(a, 0, false, zoom * 0.65, color))
                                 .into_any_element(),
                             Some(render_2d_math_node_colored(b, 0, false, zoom * 0.65, color)),
@@ -5949,47 +6331,47 @@ fn render_2d_math_node_colored(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .items_center()
                             .when_some(hi_node, |el, h| el.child(h))
-                            .child(math_span_colored("∑", zoom * 1.25, color))
+                            .child(math_big_op("∑", 23.0 * zoom, color))
                             .child(lo_node),
                     )
-                    .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color))
+                    .child(
+                        div()
+                            .ml(px(4.0 * zoom))
+                            .child(render_2d_math_node_colored(&args[0], 3, false, zoom, color)),
+                    )
                     .into_any_element()
             }
             "exp" if args.len() == 1 => div()
                 .flex()
                 .flex_row()
-                .items_start()
-                .child(math_span_colored("e", zoom, color))
-                .child(div().mb(px(8.0 * zoom)).child(render_2d_math_node_colored(
-                    &args[0],
-                    0,
-                    true,
-                    zoom * 0.72,
-                    color,
-                )))
+                .items_end()
+                .child(math_italic("e", zoom, color))
+                .child(div().mb(px(6.5 * zoom)).ml(px(0.5 * zoom)).child(
+                    render_2d_math_node_colored(&args[0], 0, true, zoom * 0.72, color),
+                ))
                 .into_any_element(),
             "factorial" if args.len() == 1 => div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .child(render_2d_math_node_colored(&args[0], 5, false, zoom, color))
-                .child(math_span_colored("!", zoom, color))
+                .child(math_roman("!", zoom, color))
                 .into_any_element(),
             "sqrt" if args.len() == 1 => div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(math_span_colored("√", zoom, color))
+                .child(math_big_op("√", 19.5 * zoom, color))
                 .child(
                     div()
-                        .px_1()
+                        .pt(px(1.5 * zoom))
+                        .px(px(2.5 * zoom))
                         .border_t_1()
                         .border_color(color)
                         .child(render_2d_math_node_colored(&args[0], 0, false, zoom, color)),
@@ -5999,29 +6381,42 @@ fn render_2d_math_node_colored(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_1()
                 .child(match &args[0] {
                     Expr::List(params) if params.len() == 1 => {
                         render_2d_math_node_colored(&params[0], 0, false, zoom, color)
                     }
                     other => render_2d_math_node_colored(other, 0, false, zoom, color),
                 })
-                .child(math_span_colored("→", zoom, color))
+                .child(div().mx(px(4.5 * zoom)).child(math_op("→", zoom, color)))
                 .child(render_2d_math_node_colored(&args[1], 0, false, zoom, color))
                 .into_any_element(),
             _ => {
-                let mut row = div()
+                let fn_node = if is_upright_math_fn(name) {
+                    math_roman(name.clone(), zoom, color)
+                } else {
+                    math_italic(name.clone(), zoom, color)
+                };
+                let tall_args = args.iter().any(expr_is_tall);
+                let mut inner_row = div().flex().flex_row().items_center();
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        inner_row = inner_row
+                            .child(div().mr(px(3.5 * zoom)).child(math_roman(",", zoom, color)));
+                    }
+                    inner_row =
+                        inner_row.child(render_2d_math_node_colored(a, 0, false, zoom, color));
+                }
+                div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(math_span_colored(format!("{name}("), zoom, color));
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        row = row.child(math_span_colored(", ", zoom, color));
-                    }
-                    row = row.child(render_2d_math_node_colored(a, 0, false, zoom, color));
-                }
-                row.child(math_span_colored(")", zoom, color))
+                    .child(fn_node)
+                    .child(wrap_parens_colored(
+                        inner_row.into_any_element(),
+                        tall_args,
+                        zoom,
+                        color,
+                    ))
                     .into_any_element()
             }
         },
@@ -6030,9 +6425,8 @@ fn render_2d_math_node_colored(
             .flex_row()
             .flex_wrap()
             .items_center()
-            .gap_1()
             .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
-            .child(math_span_colored("=", zoom, color))
+            .child(div().mx(px(4.5 * zoom)).child(math_op("=", zoom, color)))
             .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::Inequality(op, lhs, rhs) => div()
@@ -6040,13 +6434,12 @@ fn render_2d_math_node_colored(
             .flex_row()
             .flex_wrap()
             .items_center()
-            .gap_1()
             .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
-            .child(math_span_colored(
+            .child(div().mx(px(4.5 * zoom)).child(math_op(
                 op.pretty().trim().to_string(),
                 zoom,
                 color,
-            ))
+            )))
             .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::Range(lhs, rhs) => div()
@@ -6054,7 +6447,11 @@ fn render_2d_math_node_colored(
             .flex_row()
             .items_center()
             .child(render_2d_math_node_colored(lhs, 1, false, zoom, color))
-            .child(math_span_colored("..", zoom, color))
+            .child(
+                div()
+                    .mx(px(1.5 * zoom))
+                    .child(math_roman("..", zoom, color)),
+            )
             .child(render_2d_math_node_colored(rhs, 1, true, zoom, color))
             .into_any_element(),
         Expr::List(items) => {
@@ -6063,48 +6460,16 @@ fn render_2d_math_node_colored(
                 .flex_row()
                 .flex_wrap()
                 .items_center()
-                .child(math_span_colored("[", zoom, color));
+                .child(math_roman("[", zoom, color));
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    row = row.child(math_span_colored(", ", zoom, color));
+                    row = row.child(div().mr(px(3.5 * zoom)).child(math_roman(",", zoom, color)));
                 }
                 row = row.child(render_2d_math_node_colored(item, 0, false, zoom, color));
             }
-            row.child(math_span_colored("]", zoom, color))
-                .into_any_element()
+            row.child(math_roman("]", zoom, color)).into_any_element()
         }
-        Expr::Matrix(rows) => div()
-            .px_3()
-            .py_1p5()
-            .border_l_2()
-            .border_r_2()
-            .border_color(color)
-            .rounded_sm()
-            .flex()
-            .flex_col()
-            .gap_1p5()
-            .children(rows.iter().map(|row| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_4()
-                    .children(row.iter().map(|cell| {
-                        div()
-                            .min_w(px(40.0 * zoom))
-                            .flex()
-                            .justify_center()
-                            .items_center()
-                            .child(render_2d_math_node_colored(
-                                cell,
-                                0,
-                                false,
-                                zoom * 0.94,
-                                color,
-                            ))
-                    }))
-            }))
-            .into_any_element(),
+        Expr::Matrix(rows) => render_2d_matrix_colored(rows, zoom, color),
     }
 }
 
@@ -6414,6 +6779,7 @@ fn next_char_boundary(s: &str, idx: usize) -> usize {
 pub fn run_gui() {
     gpui::Application::new().run(|cx: &mut App| {
         register_keybindings(cx);
+        init_math_fonts(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx| {
             cx.quit();

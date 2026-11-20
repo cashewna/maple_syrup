@@ -38,10 +38,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let mut i = 0;
 
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
-        if ch.is_ascii_whitespace() {
-            i += 1;
+    while i < input.len() {
+        let rest = &input[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            i += ch.len_utf8();
             continue;
         }
         if ch == '#' {
@@ -51,7 +54,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             continue;
         }
         if ch == '%' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+            if rest.starts_with("%%") {
                 tokens.push(Token::DoublePercent);
                 i += 2;
             } else {
@@ -115,53 +118,52 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             tokens.push(Token::Ident(input[start..i].to_string()));
             continue;
         }
-        // Multi-character operators
-        if i + 1 < bytes.len() {
-            let two = &input[i..i + 2];
-            match two {
-                ":=" => {
-                    tokens.push(Token::Assign);
-                    i += 2;
-                    continue;
-                }
-                "->" => {
-                    tokens.push(Token::Arrow);
-                    i += 2;
-                    continue;
-                }
-                ".." => {
-                    tokens.push(Token::Range);
-                    i += 2;
-                    continue;
-                }
-                "**" => {
-                    tokens.push(Token::Caret);
-                    i += 2;
-                    continue;
-                }
-                "<=" => {
-                    tokens.push(Token::LessEq);
-                    i += 2;
-                    continue;
-                }
-                ">=" => {
-                    tokens.push(Token::GreaterEq);
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
+        // Multi-character operators matched safely at UTF-8 boundaries
+        if rest.starts_with(":=") {
+            tokens.push(Token::Assign);
+            i += 2;
+            continue;
+        }
+        if rest.starts_with("->") {
+            tokens.push(Token::Arrow);
+            i += 2;
+            continue;
+        }
+        if rest.starts_with("..") {
+            tokens.push(Token::Range);
+            i += 2;
+            continue;
+        }
+        if rest.starts_with("**") {
+            tokens.push(Token::Caret);
+            i += 2;
+            continue;
+        }
+        if rest.starts_with("<=") {
+            tokens.push(Token::LessEq);
+            i += 2;
+            continue;
+        }
+        if rest.starts_with(">=") {
+            tokens.push(Token::GreaterEq);
+            i += 2;
+            continue;
         }
 
         let tok = match ch {
             '+' => Token::Plus,
-            '-' => Token::Minus,
-            '*' => Token::Star,
+            '-' | '−' => Token::Minus,
+            '*' | '·' | '×' => Token::Star,
             '/' => Token::Slash,
             '^' => Token::Caret,
             '=' => Token::Equals,
             '<' => Token::Less,
             '>' => Token::Greater,
+            '≤' => Token::LessEq,
+            '≥' => Token::GreaterEq,
+            '→' => Token::Arrow,
+            'π' => Token::Ident("Pi".to_string()),
+            '∞' => Token::Ident("infinity".to_string()),
             '$' => Token::Dollar,
             ',' => Token::Comma,
             ';' => Token::Semicolon,
@@ -174,7 +176,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             other => bail!("unexpected character `{other}`"),
         };
         tokens.push(tok);
-        i += 1;
+        i += ch.len_utf8();
     }
 
     Ok(tokens)

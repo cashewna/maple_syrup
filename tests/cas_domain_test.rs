@@ -547,3 +547,21 @@ fn parser_and_solver_support_pipe_abs_and_rational_inequalities() {
         "[Or(And(-1 < x, x < -1/3), And(1/4 < x, x < 1/2))]"
     );
 }
+
+#[test]
+fn parser_handles_unicode_math_and_never_panics_on_multibyte_chars() {
+    assert!(parse_expr("∫_0^Pi sin(x) dx").is_err());
+    assert!(parse_expr("lim_{x→0} sin(x)/x").is_err());
+
+    let mut env = Environment::new();
+    assert_eq!(
+        eval_single_text(&mut env, "solve(2*x − 3 ≤ 5, x);"),
+        "[x <= 4]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(2·x − 3 ≥ 5, x);"),
+        "[x >= 4]"
+    );
+    assert_eq!(eval_single_text(&mut env, "sin(π);"), "0");
+    assert_eq!(eval_single_text(&mut env, "limit(1/x, x = ∞);"), "0");
+}
