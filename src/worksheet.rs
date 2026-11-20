@@ -1,7 +1,7 @@
 use crate::ast::{Expr, Statement, format_pretty_math};
 use crate::env::{Environment, EvalOutput};
 use crate::parser::parse_statements;
-use crate::plot::{PlotData, sample_plot};
+use crate::plot::{Plot3dData, PlotData, sample_plot};
 use crate::rational::Rational;
 use crate::simplify::collect_symbols;
 use std::collections::BTreeSet;
@@ -13,6 +13,7 @@ pub enum CellOutput {
     Text(String),
     MatrixGrid(Vec<Vec<String>>),
     Plot(PlotData),
+    Plot3d(Plot3dData),
     Suppressed,
     Error(String),
 }
@@ -85,6 +86,7 @@ impl WorksheetCell {
                     .join("; ")
             ),
             CellOutput::Plot(p) => p.title.clone(),
+            CellOutput::Plot3d(s) => s.title.clone(),
             CellOutput::Suppressed => String::new(),
             CellOutput::Error(e) => e.clone(),
         }
@@ -112,7 +114,10 @@ impl WorksheetCell {
                 ("Taylor Series (deg 5)", "series(%, x = 0, 5);".to_string()),
                 ("Plot 2D (-Pi..Pi)", "plot(%, x = -Pi..Pi);".to_string()),
             ],
-            CellOutput::Plot(_) | CellOutput::Suppressed | CellOutput::Error(_) => Vec::new(),
+            CellOutput::Plot(_)
+            | CellOutput::Plot3d(_)
+            | CellOutput::Suppressed
+            | CellOutput::Error(_) => Vec::new(),
         }
     }
 }
@@ -178,6 +183,7 @@ impl Worksheet {
                             (Some(val), preview, cell_out)
                         }
                         Ok(EvalOutput::Plot(plot)) => (None, None, CellOutput::Plot(plot)),
+                        Ok(EvalOutput::Plot3d(surf)) => (None, None, CellOutput::Plot3d(surf)),
                         Ok(EvalOutput::Suppressed) => (None, None, CellOutput::Suppressed),
                         Err(err) => (None, None, CellOutput::Error(err.to_string())),
                     };
@@ -235,6 +241,36 @@ impl Worksheet {
         }
     }
 
+    /// Update cell `cell_idx` in place and replay the worksheet so downstream dependent cells stay coherent.
+    pub fn update_cell(&mut self, cell_idx: usize, new_input: &str) -> bool {
+        let trimmed = new_input.trim();
+        if cell_idx >= self.cells.len() || trimmed.is_empty() {
+            return false;
+        }
+        self.cells[cell_idx].input = trimmed.to_string();
+        self.execute_all();
+        true
+    }
+
+    /// Load a `.mpl` script or `.mw` Maple XML worksheet from `path`, clearing and evaluating each cell.
+    pub fn load_file(&mut self, path: &std::path::Path) -> anyhow::Result<Vec<WorksheetCell>> {
+        let raw = std::fs::read_to_string(path)?;
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let script = if ext == "mw" {
+            extract_mw_inputs(&raw)
+        } else {
+            raw
+        };
+        self.env.restart();
+        self.cells.clear();
+        let cells = self.evaluate(&script);
+        Ok(cells)
+    }
+
     /// Load and run a demonstration worksheet starter session.
     pub fn load_preset(&mut self, preset: &str) -> Vec<WorksheetCell> {
         let script = match preset {
@@ -288,7 +324,11 @@ impl Worksheet {
 
 fn build_preview_plot(expr: &Expr) -> Option<PlotData> {
     match expr {
-        Expr::Matrix(_) | Expr::List(_) | Expr::Equation(_, _) | Expr::Range(_, _) => return None,
+        Expr::Matrix(_)
+        | Expr::List(_)
+        | Expr::Equation(_, _)
+        | Expr::Inequality(_, _, _)
+        | Expr::Range(_, _) => return None,
         Expr::Call(name, _) if name == "__arrow__" => return None,
         _ => {}
     }
@@ -330,4 +370,51 @@ fn format_statement_label(stmt: &crate::ast::Statement) -> String {
         Statement::EvalExpr { expr, terminator } => format!("{expr}{}", term(*terminator)),
         Statement::Restart { terminator } => format!("restart{}", term(*terminator)),
     }
+}
+
+fn extract_mw_inputs(xml: &str) -> String {
+    let mut out = String::new();
+    let mut rest = xml;
+    while let Some(start_tag) = rest.find("<Input") {
+        let after_start = &rest[start_tag..];
+        let Some(gt) = after_start.find('>') else {
+            break;
+        };
+        let body_start = &after_start[gt + 1..];
+        let Some(end_tag) = body_start.find("</Input>") else {
+            break;
+        };
+        let raw_chunk = &body_start[..end_tag];
+        let stripped = strip_xml_tags(raw_chunk);
+        let decoded = stripped
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&");
+        let trimmed = decoded.trim();
+        if !trimmed.is_empty() {
+            out.push_str(trimmed);
+            if !trimmed.ends_with(';') && !trimmed.ends_with(':') {
+                out.push(';');
+            }
+            out.push('\n');
+        }
+        rest = &body_start[end_tag + "</Input>".len()..];
+    }
+    if out.is_empty() { xml.to_string() } else { out }
+}
+
+fn strip_xml_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }

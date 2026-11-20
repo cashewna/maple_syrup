@@ -39,6 +39,22 @@ fn eval_headless(script: &str) -> ExitCode {
                     plot.series.len()
                 );
             }
+            CellOutput::Plot3d(surf) => {
+                println!(
+                    "    Plot3d({}) {} in [{:.3}, {:.3}], {} in [{:.3}, {:.3}], z in [{:.3}, {:.3}] ({}x{} grid)",
+                    surf.title,
+                    surf.x_label,
+                    surf.x_min,
+                    surf.x_max,
+                    surf.y_label,
+                    surf.y_min,
+                    surf.y_max,
+                    surf.z_min,
+                    surf.z_max,
+                    surf.rows,
+                    surf.cols
+                );
+            }
             CellOutput::Suppressed => {}
             CellOutput::Error(err) => {
                 eprintln!("    Error: {err}");

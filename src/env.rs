@@ -1,13 +1,16 @@
 use crate::ast::{Expr, Statement, Terminator};
-use crate::calculus::{differentiate_n, integrate, integrate_definite, limit, series, solve};
+use crate::calculus::{
+    differentiate_n, dsolve, integrate, integrate_definite, limit, partial_fractions, series,
+    solve, summation,
+};
 use crate::linalg::{
-    add_matrices, build_matrix, determinant, eigenvalues, inverse, matrix_pow, multiply_matrices,
-    rref, scale_matrix, trace, transpose,
+    add_matrices, build_matrix, determinant, eigenvalues, eigenvectors, inverse, matrix_pow,
+    multiply_matrices, nullspace, rank, rref, scale_matrix, trace, transpose,
 };
 use crate::parser::parse_statements;
-use crate::plot::{PlotData, sample_plot};
+use crate::plot::{Plot3dData, PlotData, sample_plot, sample_plot3d};
 use crate::rational::Rational;
-use crate::simplify::{evalf, expand, factor, simplify, subs};
+use crate::simplify::{evalf, expand, factor, normal, simplify, subs};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashSet};
 
@@ -23,6 +26,7 @@ pub struct UserFunction {
 pub enum EvalOutput {
     Value(Expr),
     Plot(PlotData),
+    Plot3d(Plot3dData),
     Suppressed,
 }
 
@@ -110,6 +114,7 @@ impl Environment {
                 let output = self.eval_expr_or_plot(expr)?;
                 match output {
                     EvalOutput::Plot(plot) => Ok(EvalOutput::Plot(plot)),
+                    EvalOutput::Plot3d(surf) => Ok(EvalOutput::Plot3d(surf)),
                     EvalOutput::Value(val) => {
                         self.record_history(val.clone());
                         if *terminator == Terminator::Colon {
@@ -148,6 +153,38 @@ impl Environment {
             let b = self.eval_expr_with_shadow(raw_b, &mut shadowed)?;
             let curve = self.eval_with_var_shadowed(&args[0], &var, &mut shadowed)?;
             return Ok(EvalOutput::Plot(sample_plot(&curve, &var, &a, &b)?));
+        }
+        if let Expr::Call(name, args) = expr
+            && name == "plot3d"
+        {
+            if args.len() != 3 {
+                bail!("`plot3d` expects `(expr, x = a..b, y = c..d)`");
+            }
+            let Expr::Equation(xlhs, xrhs) = &args[1] else {
+                bail!("`plot3d` second argument must be `x = a..b`");
+            };
+            let Expr::Equation(ylhs, yrhs) = &args[2] else {
+                bail!("`plot3d` third argument must be `y = c..d`");
+            };
+            let x_var = Self::extract_var_name(xlhs)?;
+            let y_var = Self::extract_var_name(ylhs)?;
+            let Expr::Range(raw_xa, raw_xb) = xrhs.as_ref() else {
+                bail!("`plot3d` x-range must be `x = a..b`, got `{}`", args[1]);
+            };
+            let Expr::Range(raw_ya, raw_yb) = yrhs.as_ref() else {
+                bail!("`plot3d` y-range must be `y = c..d`, got `{}`", args[2]);
+            };
+            let mut shadowed = HashSet::new();
+            let xa = self.eval_expr_with_shadow(raw_xa, &mut shadowed)?;
+            let xb = self.eval_expr_with_shadow(raw_xb, &mut shadowed)?;
+            let ya = self.eval_expr_with_shadow(raw_ya, &mut shadowed)?;
+            let yb = self.eval_expr_with_shadow(raw_yb, &mut shadowed)?;
+            shadowed.insert(x_var.clone());
+            shadowed.insert(y_var.clone());
+            let surf_expr = self.eval_expr_with_shadow(&args[0], &mut shadowed)?;
+            return Ok(EvalOutput::Plot3d(sample_plot3d(
+                &surf_expr, &x_var, &xa, &xb, &y_var, &ya, &yb,
+            )?));
         }
         Ok(EvalOutput::Value(self.eval_expr(expr)?))
     }
@@ -234,6 +271,11 @@ impl Environment {
                 Box::new(self.eval_expr_with_shadow(a, shadowed)?),
                 Box::new(self.eval_expr_with_shadow(b, shadowed)?),
             )),
+            Expr::Inequality(op, a, b) => Ok(Expr::Inequality(
+                *op,
+                Box::new(self.eval_expr_with_shadow(a, shadowed)?),
+                Box::new(self.eval_expr_with_shadow(b, shadowed)?),
+            )),
             Expr::Range(a, b) => Ok(Expr::Range(
                 Box::new(self.eval_expr_with_shadow(a, shadowed)?),
                 Box::new(self.eval_expr_with_shadow(b, shadowed)?),
@@ -271,7 +313,17 @@ impl Environment {
 
         if matches!(
             name,
-            "diff" | "int" | "integrate" | "limit" | "series" | "taylor" | "solve"
+            "diff"
+                | "int"
+                | "integrate"
+                | "limit"
+                | "series"
+                | "taylor"
+                | "solve"
+                | "dsolve"
+                | "sum"
+                | "Sum"
+                | "convert"
         ) {
             return self.eval_calculus_call(name, args, shadowed);
         }
@@ -352,7 +404,13 @@ impl Environment {
                 if eval_args.len() != 1 {
                     bail!("`simplify` expects 1 argument");
                 }
-                Ok(simplify(&eval_args[0]))
+                Ok(normal(&simplify(&eval_args[0])))
+            }
+            "normal" => {
+                if eval_args.len() != 1 {
+                    bail!("`normal` expects 1 argument");
+                }
+                Ok(normal(&eval_args[0]))
             }
             "evalf" => {
                 if eval_args.len() != 1 {
@@ -396,6 +454,24 @@ impl Environment {
                     bail!("`{name}` expects 1 matrix argument");
                 }
                 eigenvalues(&eval_args[0])
+            }
+            "Eigenvectors" | "eigenvectors" => {
+                if eval_args.len() != 1 {
+                    bail!("`{name}` expects 1 matrix argument");
+                }
+                eigenvectors(&eval_args[0])
+            }
+            "NullSpace" | "nullspace" => {
+                if eval_args.len() != 1 {
+                    bail!("`{name}` expects 1 matrix argument");
+                }
+                nullspace(&eval_args[0])
+            }
+            "Rank" | "rank" => {
+                if eval_args.len() != 1 {
+                    bail!("`{name}` expects 1 matrix argument");
+                }
+                rank(&eval_args[0])
             }
             "Multiply" => {
                 if eval_args.len() != 2 {
@@ -611,7 +687,149 @@ impl Environment {
                 let eq_expr = self.eval_with_var_shadowed(&args[0], &var, shadowed)?;
                 solve(&eq_expr, &var)
             }
+            "dsolve" => {
+                if args.len() != 2 {
+                    bail!("`dsolve` expects `(ode_or_system, y)`");
+                }
+                let y_name = match &args[1] {
+                    Expr::Symbol(s) | Expr::Call(s, _) => s.clone(),
+                    other => {
+                        bail!("`dsolve` target must be variable or function `y`, got `{other}`")
+                    }
+                };
+                let mut protected: HashSet<String> = shadowed.clone();
+                protected.insert(y_name);
+                collect_diff_vars(&args[0], &mut protected);
+                if let Expr::Call(_, targs) = &args[1] {
+                    for ta in targs {
+                        if let Expr::Symbol(s) = ta {
+                            protected.insert(s.clone());
+                        }
+                    }
+                }
+                let prepared = self.substitute_unprotected_vars(&args[0], &protected);
+                dsolve(&prepared, &args[1])
+            }
+            "sum" | "Sum" => {
+                if args.len() != 2 {
+                    bail!("`{name}` expects `(expr, k = a..b)`");
+                }
+                let Expr::Equation(lhs, rhs) = &args[1] else {
+                    bail!("`{name}` second argument must be `k = a..b`");
+                };
+                let var = Self::extract_var_name(lhs)?;
+                let Expr::Range(raw_lo, raw_hi) = rhs.as_ref() else {
+                    bail!("`{name}` range must be `k = a..b`, got `{}`", args[1]);
+                };
+                let lo = self.eval_expr_with_shadow(raw_lo, shadowed)?;
+                let hi = self.eval_expr_with_shadow(raw_hi, shadowed)?;
+                let body = self.eval_with_var_shadowed(&args[0], &var, shadowed)?;
+                summation(&body, &var, &lo, &hi)
+            }
+            "convert" => {
+                if args.len() != 3 {
+                    bail!("`convert` expects `(expr, parfrac, var)`");
+                }
+                let Expr::Symbol(kind) = &args[1] else {
+                    bail!(
+                        "`convert` conversion target must be symbol `parfrac`, got `{}`",
+                        args[1]
+                    );
+                };
+                if kind != "parfrac" {
+                    bail!("unsupported `convert` target `{kind}` (expected `parfrac`)");
+                }
+                let var = Self::extract_var_name(&args[2])?;
+                let expr = self.eval_with_var_shadowed(&args[0], &var, shadowed)?;
+                partial_fractions(&expr, &var)
+            }
             _ => unreachable!(),
         }
+    }
+
+    fn substitute_unprotected_vars(&self, expr: &Expr, protected: &HashSet<String>) -> Expr {
+        match expr {
+            Expr::Symbol(s) if !protected.contains(s) => self
+                .variables
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| expr.clone()),
+            Expr::UnaryNeg(a) => {
+                Expr::UnaryNeg(Box::new(self.substitute_unprotected_vars(a, protected)))
+            }
+            Expr::Add(a, b) => Expr::Add(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::Sub(a, b) => Expr::Sub(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::Mul(a, b) => Expr::Mul(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::Div(a, b) => Expr::Div(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::Pow(a, b) => Expr::Pow(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::Equation(a, b) => Expr::Equation(
+                Box::new(self.substitute_unprotected_vars(a, protected)),
+                Box::new(self.substitute_unprotected_vars(b, protected)),
+            ),
+            Expr::List(items) => Expr::List(
+                items
+                    .iter()
+                    .map(|item| self.substitute_unprotected_vars(item, protected))
+                    .collect(),
+            ),
+            Expr::Call(name, args) => Expr::Call(
+                name.clone(),
+                args.iter()
+                    .map(|a| self.substitute_unprotected_vars(a, protected))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+}
+
+fn collect_diff_vars(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Call(name, args) if name == "diff" && args.len() >= 2 => {
+            for a in &args[1..] {
+                match a {
+                    Expr::Symbol(s) => {
+                        out.insert(s.clone());
+                    }
+                    Expr::Call(op, sargs) if op == "$" && !sargs.is_empty() => {
+                        if let Expr::Symbol(s) = &sargs[0] {
+                            out.insert(s.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Expr::UnaryNeg(a) => collect_diff_vars(a, out),
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Pow(a, b)
+        | Expr::Equation(a, b) => {
+            collect_diff_vars(a, out);
+            collect_diff_vars(b, out);
+        }
+        Expr::List(items) | Expr::Call(_, items) => {
+            for item in items {
+                collect_diff_vars(item, out);
+            }
+        }
+        _ => {}
     }
 }

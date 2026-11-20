@@ -91,3 +91,93 @@ pub fn sample_plot(expr_arg: &Expr, var: &str, a: &Expr, b: &Expr) -> Result<Plo
         series,
     })
 }
+
+/// Complete 3D surface grid payload returned by `plot3d(expr, x = a..b, y = c..d)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plot3dData {
+    pub title: String,
+    pub x_label: String,
+    pub y_label: String,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub z_min: f64,
+    pub z_max: f64,
+    pub rows: usize,
+    pub cols: usize,
+    pub grid: Vec<Vec<(f64, f64, f64)>>,
+}
+
+/// Sample a two-variable expression over `x = ax..bx, y = ay..by` into a 3D surface mesh.
+pub fn sample_plot3d(
+    expr: &Expr,
+    x_var: &str,
+    x_a: &Expr,
+    x_b: &Expr,
+    y_var: &str,
+    y_a: &Expr,
+    y_b: &Expr,
+) -> Result<Plot3dData> {
+    let x_min = evalf(x_a)?;
+    let x_max = evalf(x_b)?;
+    let y_min = evalf(y_a)?;
+    let y_max = evalf(y_b)?;
+    if !x_min.is_finite() || !x_max.is_finite() || x_max <= x_min {
+        bail!("invalid 3D x-range `{x_a}..{x_b}`");
+    }
+    if !y_min.is_finite() || !y_max.is_finite() || y_max <= y_min {
+        bail!("invalid 3D y-range `{y_a}..{y_b}`");
+    }
+
+    const STEPS: usize = 18;
+    let mut grid = Vec::with_capacity(STEPS + 1);
+    let mut z_min = f64::INFINITY;
+    let mut z_max = f64::NEG_INFINITY;
+    let mut finite_count = 0usize;
+
+    for i in 0..=STEPS {
+        let u = i as f64 / STEPS as f64;
+        let x = x_min + u * (x_max - x_min);
+        let with_x = subs(x_var, &Expr::Float(x), expr);
+        let mut row = Vec::with_capacity(STEPS + 1);
+        for j in 0..=STEPS {
+            let v = j as f64 / STEPS as f64;
+            let y = y_min + v * (y_max - y_min);
+            let z = match evalf(&subs(y_var, &Expr::Float(y), &with_x)) {
+                Ok(zv) if zv.is_finite() && zv.abs() <= 1e6 => {
+                    finite_count += 1;
+                    z_min = z_min.min(zv);
+                    z_max = z_max.max(zv);
+                    zv
+                }
+                _ => f64::NAN,
+            };
+            row.push((x, y, z));
+        }
+        grid.push(row);
+    }
+
+    if finite_count == 0 {
+        bail!("plot3d expression `{expr}` produced no finite points");
+    }
+    if (z_max - z_min).abs() < 1e-9 {
+        z_min -= 1.0;
+        z_max += 1.0;
+    }
+
+    Ok(Plot3dData {
+        title: format!("z = {expr}"),
+        x_label: x_var.to_string(),
+        y_label: y_var.to_string(),
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        z_min,
+        z_max,
+        rows: STEPS + 1,
+        cols: STEPS + 1,
+        grid,
+    })
+}

@@ -354,3 +354,171 @@ fn worksheet_supports_clear_outputs_and_delete_cell_renumbering() {
     assert_eq!(ws.cells[1].output, CellOutput::Suppressed);
     assert!(ws.cells[0].result_expr.is_none());
 }
+
+#[test]
+fn kernel_solves_linear_abs_and_quadratic_inequalities() {
+    let mut env = Environment::new();
+    assert_eq!(
+        eval_single_text(&mut env, "solve(2*x - 3 < 5, x);"),
+        "[x < 4]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(abs(2*x - 3) < 5, x);"),
+        "[And(-1 < x, x < 4)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(x^2 - 5*x + 6 <= 0, x);"),
+        "[And(2 <= x, x <= 3)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(3 < 2*x - 3 < 7, x);"),
+        "[And(3 < x, x < 5)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(5 <= abs(6*x - 1), x);"),
+        "[Or(x <= -2/3, x >= 1)]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "solve(abs(2*x - 3) < abs(5*x - 4), x);"),
+        "[Or(x < 1/3, x > 1)]"
+    );
+}
+
+#[test]
+fn kernel_dsolve_handles_first_and_second_order_linear_odes() {
+    let mut env = Environment::new();
+    assert_eq!(
+        eval_single_text(&mut env, "dsolve(diff(y, x) = 3*y, y);"),
+        "y = _C1*exp(3*x)"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "dsolve(diff(y, x$2) + y = 0, y);"),
+        "y = _C1*cos(x) + _C2*sin(x)"
+    );
+    assert_eq!(
+        eval_single_text(
+            &mut env,
+            "dsolve(diff(y, x$2) - 5*diff(y, x) + 6*y = 0, y);"
+        ),
+        "y = _C1*exp(2*x) + _C2*exp(3*x)"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "dsolve([diff(y, x) = 3*y, y(0) = 2], y);"),
+        "y = 2*exp(3*x)"
+    );
+}
+
+#[test]
+fn kernel_supports_complex_arithmetic_parfrac_and_summations() {
+    let mut env = Environment::new();
+    assert_eq!(eval_single_text(&mut env, "(2 + 3*I)*(1 - I);"), "5 + I");
+    assert_eq!(eval_single_text(&mut env, "I^2;"), "-1");
+    assert_eq!(eval_single_text(&mut env, "Re(3 + 4*I);"), "3");
+    assert_eq!(eval_single_text(&mut env, "Im(3 + 4*I);"), "4");
+    assert_eq!(eval_single_text(&mut env, "conjugate(3 + 4*I);"), "3 - 4*I");
+
+    let pf = eval_single_text(&mut env, "convert(1/(x^2 - 1), parfrac, x);");
+    assert!(
+        pf.contains("x - 1") && pf.contains("x + 1"),
+        "expected linear factors in parfrac output, got `{pf}`"
+    );
+    assert_eq!(
+        eval_single_text(
+            &mut env,
+            "simplify(convert(1/(x^2 - 1), parfrac, x) - 1/(x^2 - 1));"
+        ),
+        "0"
+    );
+
+    assert_eq!(eval_single_text(&mut env, "sum(k^2, k = 1..5);"), "55");
+    assert_eq!(
+        eval_single_text(&mut env, "simplify(sum(k, k = 1..n) - n*(n + 1)/2);"),
+        "0"
+    );
+}
+
+#[test]
+fn linear_algebra_supports_3x3_eigenvalues_eigenvectors_nullspace_and_rank() {
+    let mut env = Environment::new();
+    assert_eq!(
+        eval_single_text(
+            &mut env,
+            "Eigenvalues(Matrix([[4, 1, 0], [1, 4, 0], [0, 0, 7]]));"
+        ),
+        "[3, 5, 7]"
+    );
+    assert_eq!(
+        eval_single_text(&mut env, "Rank(Matrix([[1, 2, 3], [4, 5, 6], [7, 8, 9]]));"),
+        "2"
+    );
+    let ns = eval_single_text(
+        &mut env,
+        "NullSpace(Matrix([[1, 2, 3], [4, 5, 6], [7, 8, 9]]));",
+    );
+    assert_eq!(ns, "[[1, -2, 1]]");
+
+    let ev = eval_single_text(
+        &mut env,
+        "Eigenvectors(Matrix([[4, 1, 0], [1, 4, 0], [0, 0, 7]]));",
+    );
+    assert!(
+        ev.contains("[3, 5, 7]") && ev.contains("[["),
+        "expected eigenvalues + eigenvector basis for 3x3 matrix, got `{ev}`"
+    );
+}
+
+#[test]
+fn worksheet_evaluates_plot3d_surfaces_and_deplot_tutor_simulations() {
+    let mut ws = Worksheet::new();
+    let cell = ws
+        .evaluate("plot3d(sin(x)*cos(y), x = -Pi..Pi, y = -Pi..Pi);")
+        .pop()
+        .unwrap();
+    match &cell.output {
+        CellOutput::Plot3d(surf) => {
+            assert!(surf.rows >= 12 && surf.cols >= 12);
+            assert!(surf.z_max > surf.z_min);
+        }
+        other => panic!("expected Plot3d output, got {other:?}"),
+    }
+
+    let presets = maple_gpui::tutor::de_presets();
+    assert!(presets.iter().any(|p| p.name.contains("Damped harmonic")));
+    let scene = maple_gpui::tutor::simulate_de_scene(0, 1.5, 0.0);
+    assert!(!scene.field_arrows.is_empty());
+    assert!(scene.trajectory.len() >= 40);
+    assert!(!maple_gpui::tutor::study_guide_chapters().is_empty());
+    assert!(!maple_gpui::tutor::help_articles().is_empty());
+}
+
+#[test]
+fn worksheet_loads_mpl_and_mw_files_and_updates_cell_in_place() {
+    let mut ws = Worksheet::new();
+    ws.evaluate("a := 2;");
+    ws.evaluate("a * 10;");
+    assert!(ws.update_cell(0, "a := 5;"));
+    assert_eq!(ws.cells.len(), 2);
+    assert_eq!(ws.cells[0].formatted_output(), "a := 5");
+    assert_eq!(ws.cells[1].formatted_output(), "50");
+
+    let tmp_dir = std::env::temp_dir();
+    let mpl_path = tmp_dir.join("maple_gpui_test_sheet.mpl");
+    std::fs::write(&mpl_path, "# Maple test\nx0 := 7;\nx0^2;\n").unwrap();
+    let mut ws_mpl = Worksheet::new();
+    let loaded = ws_mpl.load_file(&mpl_path).unwrap();
+    let _ = std::fs::remove_file(&mpl_path);
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(ws_mpl.cells[1].formatted_output(), "49");
+
+    let mw_path = tmp_dir.join("maple_gpui_test_doc.mw");
+    std::fs::write(
+        &mw_path,
+        r#"<Worksheet><Group><Input>solve(2*x - 3 &lt; 5, x);</Input></Group><Group><Input>dsolve(diff(y, x) = 3*y, y);</Input></Group></Worksheet>"#,
+    )
+    .unwrap();
+    let mut ws_mw = Worksheet::new();
+    let loaded_mw = ws_mw.load_file(&mw_path).unwrap();
+    let _ = std::fs::remove_file(&mw_path);
+    assert_eq!(loaded_mw.len(), 2);
+    assert_eq!(ws_mw.cells[0].formatted_output(), "[x < 4]");
+}

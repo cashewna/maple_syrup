@@ -6,5 +6,6 @@ pub mod parser;
 pub mod plot;
 pub mod rational;
 pub mod simplify;
+pub mod tutor;
 pub mod ui;
 pub mod worksheet;
