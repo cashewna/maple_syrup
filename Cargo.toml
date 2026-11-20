@@ -1,5 +1,5 @@
 [package]
-name = "maple-gpui"
+name = "maple_syrup"
 version = "0.1.0"
 edition = "2024"
 description = "Cleanroom lightweight Maple-inspired Symbolic CAS & Worksheet in Rust + GPUI"

@@ -1,16 +1,16 @@
-use maple_gpui::ui::run_gui;
-use maple_gpui::worksheet::{CellOutput, Worksheet};
+use maple_syrup::ui::run_gui;
+use maple_syrup::worksheet::{CellOutput, Worksheet};
 use std::env;
 use std::process::ExitCode;
 
 fn print_help() {
     println!(
-        "maple-gpui {} — Cleanroom Maple-inspired Symbolic CAS (GPUI)\n\n\
+        "maple_syrup {} — Cleanroom Maple-inspired Symbolic CAS (GPUI)\n\n\
          USAGE:\n  \
-           maple-gpui                 Launch interactive GPUI worksheet window\n  \
-           maple-gpui --eval <CODE>   Evaluate Maple statements headlessly and exit\n  \
-           maple-gpui --help          Show this help message\n  \
-           maple-gpui --version       Show version",
+           maple_syrup                 Launch interactive GPUI worksheet window\n  \
+           maple_syrup --eval <CODE>   Evaluate Maple statements headlessly and exit\n  \
+           maple_syrup --help          Show this help message\n  \
+           maple_syrup --version       Show version",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if arg == "--version" || arg == "-V" {
-            println!("maple-gpui {}", env!("CARGO_PKG_VERSION"));
+            println!("maple_syrup {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
         if arg == "--eval" {

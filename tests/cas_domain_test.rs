@@ -1,9 +1,9 @@
-use maple_gpui::ast::{Expr, to_latex};
-use maple_gpui::env::{Environment, EvalOutput};
-use maple_gpui::parser::parse_expr;
-use maple_gpui::rational::Rational;
-use maple_gpui::simplify::simplify;
-use maple_gpui::worksheet::{CellOutput, MatrixPresetKind, MatrixTemplate, Worksheet};
+use maple_syrup::ast::{Expr, to_latex};
+use maple_syrup::env::{Environment, EvalOutput};
+use maple_syrup::parser::parse_expr;
+use maple_syrup::rational::Rational;
+use maple_syrup::simplify::simplify;
+use maple_syrup::worksheet::{CellOutput, MatrixPresetKind, MatrixTemplate, Worksheet};
 
 fn eval_single_text(env: &mut Environment, input: &str) -> String {
     let mut outputs = env.eval_line(input).expect("evaluation should succeed");
@@ -482,13 +482,13 @@ fn worksheet_evaluates_plot3d_surfaces_and_deplot_tutor_simulations() {
         other => panic!("expected Plot3d output, got {other:?}"),
     }
 
-    let presets = maple_gpui::tutor::de_presets();
+    let presets = maple_syrup::tutor::de_presets();
     assert!(presets.iter().any(|p| p.name.contains("Damped harmonic")));
-    let scene = maple_gpui::tutor::simulate_de_scene(0, 1.5, 0.0);
+    let scene = maple_syrup::tutor::simulate_de_scene(0, 1.5, 0.0);
     assert!(!scene.field_arrows.is_empty());
     assert!(scene.trajectory.len() >= 40);
-    assert!(!maple_gpui::tutor::study_guide_chapters().is_empty());
-    assert!(!maple_gpui::tutor::help_articles().is_empty());
+    assert!(!maple_syrup::tutor::study_guide_chapters().is_empty());
+    assert!(!maple_syrup::tutor::help_articles().is_empty());
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn worksheet_loads_mpl_and_mw_files_and_updates_cell_in_place() {
     assert_eq!(ws.cells[1].formatted_output(), "50");
 
     let tmp_dir = std::env::temp_dir();
-    let mpl_path = tmp_dir.join("maple_gpui_test_sheet.mpl");
+    let mpl_path = tmp_dir.join("maple_syrup_test_sheet.mpl");
     std::fs::write(&mpl_path, "# Maple test\nx0 := 7;\nx0^2;\n").unwrap();
     let mut ws_mpl = Worksheet::new();
     let loaded = ws_mpl.load_file(&mpl_path).unwrap();
@@ -510,7 +510,7 @@ fn worksheet_loads_mpl_and_mw_files_and_updates_cell_in_place() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(ws_mpl.cells[1].formatted_output(), "49");
 
-    let mw_path = tmp_dir.join("maple_gpui_test_doc.mw");
+    let mw_path = tmp_dir.join("maple_syrup_test_doc.mw");
     std::fs::write(
         &mw_path,
         r#"<Worksheet><Group><Input>solve(2*x - 3 &lt; 5, x);</Input></Group><Group><Input>dsolve(diff(y, x) = 3*y, y);</Input></Group></Worksheet>"#,

@@ -1,4 +1,4 @@
-# Domain Glossary (`maple-gpui`)
+# Domain Glossary (`maple_syrup`)
 
 Canonical vocabulary for the cleanroom Maple-inspired Computer Algebra System (CAS) and GPUI Worksheet. All module names, structs, tests, and UI labels follow these definitions.
 

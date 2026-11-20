@@ -975,7 +975,7 @@ impl MapleWorkspaceView {
     }
 
     fn open_saved_worksheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = std::path::PathBuf::from("/home/kk/Projects/maple/worksheets");
+        let dir = std::path::PathBuf::from("/home/kk/Projects/maple_syrup/worksheets");
         let _ = std::fs::create_dir_all(&dir);
         let candidate = std::fs::read_dir(&dir)
             .ok()
@@ -1057,7 +1057,7 @@ impl MapleWorkspaceView {
             cx.notify();
             return;
         };
-        let dir = std::path::PathBuf::from("/home/kk/Projects/maple/worksheets");
+        let dir = std::path::PathBuf::from("/home/kk/Projects/maple_syrup/worksheets");
         if let Err(err) = std::fs::create_dir_all(&dir) {
             self.status_message = format!("Save failed: {err}");
             cx.notify();

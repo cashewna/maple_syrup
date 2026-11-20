@@ -1,5 +1,5 @@
 {
-  description = "maple-gpui — cleanroom Maple-inspired Symbolic CAS & GPUI Worksheet";
+  description = "maple_syrup — cleanroom Maple-inspired Symbolic CAS & GPUI Worksheet";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -33,9 +33,9 @@
         let
           runtimeLibs = runtimeLibsFor pkgs;
           desktopItem = pkgs.makeDesktopItem {
-            name = "maple-gpui";
-            exec = "maple-gpui";
-            desktopName = "Maple Worksheet (GPUI)";
+            name = "maple_syrup";
+            exec = "maple_syrup";
+            desktopName = "Maple Syrup (GPUI)";
             comment = "Cleanroom symbolic CAS and interactive GPUI worksheet";
             categories = [
               "Education"
@@ -44,8 +44,8 @@
             ];
             terminal = false;
           };
-          maple-gpui = pkgs.rustPlatform.buildRustPackage {
-            pname = "maple-gpui";
+          maple_syrup = pkgs.rustPlatform.buildRustPackage {
+            pname = "maple_syrup";
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
@@ -64,20 +64,20 @@
             postInstall = ''
               mkdir -p $out/share/applications
               cp ${desktopItem}/share/applications/* $out/share/applications/
-              wrapProgram $out/bin/maple-gpui \
+              wrapProgram $out/bin/maple_syrup \
                 --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
             '';
 
             meta = with pkgs.lib; {
               description = "Cleanroom Maple-inspired symbolic CAS and interactive GPUI worksheet";
               license = licenses.mit;
-              mainProgram = "maple-gpui";
+              mainProgram = "maple_syrup";
             };
           };
         in
         {
-          inherit maple-gpui;
-          default = maple-gpui;
+          inherit maple_syrup;
+          default = maple_syrup;
         }
       );
 
@@ -85,7 +85,7 @@
         system: _pkgs: {
           default = {
             type = "app";
-            program = "${self.packages.${system}.default}/bin/maple-gpui";
+            program = "${self.packages.${system}.default}/bin/maple_syrup";
           };
         }
       );
